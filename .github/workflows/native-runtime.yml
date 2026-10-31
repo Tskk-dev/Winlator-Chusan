@@ -1,0 +1,23 @@
+name: Native runtime foundation
+
+on:
+  push:
+    branches: [codex/android-native-runtime]
+    paths: [native-runtime/**, .github/workflows/native-runtime.yml]
+  pull_request:
+    paths: [native-runtime/**, .github/workflows/native-runtime.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r native-runtime/requirements.txt
+      - run: python -m unittest discover -s native-runtime/tests -v
