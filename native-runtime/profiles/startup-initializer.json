@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "source_sha256": "dcd883ddd41d6e0a26a8902d8c94dd123c5e8dd5990dd6a428e6b421195d38ca",
+  "va": "0x00e3d42f",
+  "bytes": 156,
+  "sha256": "50374ef59e830613476022f01720f3db27968652db8232247a32684a329a0233",
+  "kit_commit": "487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d",
+  "iat": ["0x0221a250", "0x0221a30c", "0x0221a37c", "0x0221a3a8"],
+  "apis": ["GetSystemTimeAsFileTime", "GetCurrentThreadId", "GetCurrentProcessId", "QueryPerformanceCounter"],
+  "scope": "One startup initializer with deterministic fixture APIs; no original entry/CRT execution"
+}

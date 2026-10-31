@@ -37,6 +37,15 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   1.3.352 and 140 extensions, including 79 absent from the stock list.
   Both created a graphics-queue logical device. A traversal-style driver name
   was rejected before loading. [Device verification](verification/device-results-2026-10-31.md).
+- The first startup initializer at `0x00e3d42f` now passes 4,096 original-x86
+  vector comparisons with recomp-kit-generated C on Windows x64 and physical
+  Android ARM64, with zero mismatches. All seven unknown-target/API/return and
+  invalid-memory checks terminate explicitly on both platforms.
+  [Exact scope and identities](verification/startup-initializer-2026-10-31.md).
+- The supplied SDEZ reference includes real managed `AMWithoutDaemon.NET`
+  behavior for credits, cards, backup and IO. It is useful reference material;
+  its managed interfaces do not implement the native CHUNITHM IPC/ABI.
+  [Service replacement assessment](verification/service-reference-2026-10-31.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -84,31 +93,23 @@ Brokenithm remains a behavior/protocol reference for the deferred Winlator route
 
 | Candidate | Relevant existing work | Remaining CHUNITHM work |
 | --- | --- | --- |
-| recomp-kit, inspected commit `487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d` | x86-to-C translator, guest memory/loader, Win32 shims, Android/SDL3 target | Its documented first-version scope excludes shader-model D3D8/9. The inspected DirectX adapters are for older interfaces. D3D9/Cg/E-mote, this compiler/runtime, services and timing need separate qualification. Not adopted yet. |
+| recomp-kit, inspected commit `487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d` | x86-to-C emitter, guest memory/loader, Win32 shims, Android/SDL3 target; current code includes D3D9 and shaders | One real startup initializer qualified with eager flags and a strict consumer fixture. Complete runtime not adopted: interpreter fallbacks, unresolved-import defaults and permissive returns need removal from qualification paths. D3D9/Cg/E-mote, CRT/DLL startup, floating point and timing remain unproved. |
 | Remill | x86 instruction lifting to LLVM bitcode | Not an application compatibility layer; needs discovery, ABI bridges, runtime, graphics, audio and services. |
 | McSema | binary control-flow recovery and lifting tooling | Upstream repository is archived; not the default foundation for a new port. |
 | DXVK Native | D3D9/11 translation to Vulkan without Wine; SDL3/SDL2/GLFW presentation seams | Native Android build, device/driver features and 32-bit guest COM to 64-bit host bridges must be proven. Desktop/native support is not proof of Android compatibility. |
 
 Starting the project from scratch does not require writing every library from
-scratch. Qualify a reusable translator/runtime before committing to either a
-custom implementation or a fork. The current probe intentionally supports one
-small instruction pattern and is not that translator selection.
+scratch. The first four-instruction probe used a tiny custom emitter; the newer
+startup fixture consumes the pinned recomp-kit emitter and instruction header.
+This qualification does not adopt its complete runtime.
 
 ## Next observable gates
 
-1. Expand the completed isolated ARM64 routine proof beyond its four-instruction
-   pattern; retain the original-x86 vector and device identity evidence.
-2. Qualify a translation foundation with real routines covering memory,
-   branches, indirect callbacks, integer flags and floating point. Fail on an
-   unknown instruction or target rather than accepting a silent stub.
-3. Establish the pinned game's entry/CRT/TLS/DLL startup closure and implement
-   the contracts it actually reaches. Record missing addresses and imports.
-4. Prove one original D3D9 draw and a sound-content path on Android. A native
-   clear or silence-only audio fixture is a separate, smaller result.
-5. Reproduce the observed cabinet/service boundary and connect the native
-   overlay, LEDs, card and credit actions. Keep account configuration private.
-6. Complete a real chart and validate audio clock, frame pacing, interruptions,
-   saved state and sustained thermal behavior on the target tablet.
+Follow [the implementation plan](PLAN.md). The bounded first-startup gate is
+complete. Next qualify source-selected loops/callbacks/floating point and the
+actual CRT/TLS closure, while recovering the CHUNITHM service boundary. Qualify
+the existing D3D9 backend early. Then close original content/audio and native
+services before playable chart and sustained timing checks.
 
 Snapdragon 680 / Adreno 610 performance is unknown. Ahead-of-time compilation
 does not establish native-source speed, 60 FPS or accurate rhythm timing.
@@ -185,10 +186,27 @@ arithmetic flags for fixed boundary and deterministic random inputs. It does
 not establish complete x86 semantics, the original routine's caller behavior,
 an Android ABI bridge, graphics, audio or full-game translation.
 
+## Reproduce the first startup initializer qualification
+
+Use a clean checkout of the pinned recomp-kit commit, llvm-mingw and NDK 27.2:
+
+```powershell
+python native-runtime/tools/probe_startup.py --exe '<private game bin>/chusanApp.exe' --kit '<recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --output native-runtime/.work/startup-probe
+python native-runtime/tools/test_startup_device.py --probe-dir native-runtime/.work/startup-probe --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
+```
+
+The Windows x86 oracle executes only the hash-pinned 156-byte routine. Four
+deterministic fixture APIs supply all external inputs. Generated code and all
+reference records stay under ignored `.work/`; no original bytes are published.
+The Android runner verifies artifact identities, copies the executable/vectors
+to a temporary device directory, compares all 4,096 records, checks seven
+terminal failures and removes the temporary files. This is a shell fixture,
+not an Android application or an original full-startup run.
+
 ## Primary references
 
-- [recomp-kit](https://github.com/veritr1x/recomp-kit) and its
-  [first-version exclusions](https://github.com/veritr1x/recomp-kit/blob/487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d/docs/superpowers/specs/2026-09-13-recomp-kit-design.md).
+- [recomp-kit](https://github.com/veritr1x/recomp-kit/tree/487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d).
+  Current implementation takes precedence over its older design exclusions.
 - [Remill](https://github.com/lifting-bits/remill) and
   [McSema](https://github.com/lifting-bits/mcsema).
 - [DXVK Native](https://github.com/doitsujin/dxvk#dxvk-native).
