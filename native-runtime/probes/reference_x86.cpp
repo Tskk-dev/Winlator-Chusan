@@ -12,10 +12,12 @@ extern "C" int chusan_probe(const uint8_t*, uint32_t, uint32_t, uint32_t, uint32
 
 int main(int argc, char** argv) {
     static_assert(sizeof(void*) == 4, "The reference runner must be 32-bit x86");
-    if (argc != 2) return 2;
+    if (argc != 3) return 2;
     std::ifstream input(argv[1], std::ios::binary);
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     if (bytes.size() != 9) return 3;
+    std::ofstream vectors(argv[2], std::ios::binary);
+    if (!vectors) return 9;
     auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     auto* memory = static_cast<uint8_t*>(VirtualAlloc(nullptr, 65536, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!code || !memory) return 4;
@@ -48,7 +50,11 @@ int main(int argc, char** argv) {
                          trial, original, translated, originalFlags & 0x8d5u, translatedFlags);
             return 7;
         }
+        const uint32_t record[] = {value, original, originalFlags & 0x8d5u};
+        vectors.write(reinterpret_cast<const char*>(record), sizeof(record));
     }
+    vectors.close();
+    if (!vectors) return 9;
     uint32_t result, flags;
     if (chusan_probe(memory, base, 65536, base - 0x100, &result, &flags)) return 8;
     VirtualFree(code, 0, MEM_RELEASE);

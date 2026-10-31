@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import struct
 import sys
 
 import capstone
@@ -108,19 +109,35 @@ def main():
         host_source = Path(__file__).resolve().parents[1] / "probes/reference_x86.cpp"
         subprocess.run([compiler, "--target=i686-w64-windows-gnu", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
                         str(host_source), str(compiled), "-lstdc++", "-o", str(runner)], check=True)
-        result = subprocess.run([str(runner), str(output / "routine.bin")], check=True,
+        vectors_path = output / "reference-vectors.bin"
+        result = subprocess.run([str(runner), str(output / "routine.bin"), str(vectors_path)], check=True,
                                 capture_output=True, text=True, timeout=30)
         comparison = json.loads(result.stdout)
+        vectors = vectors_path.read_bytes()
+        if len(vectors) != 4096 * 12:
+            raise ValueError("Original-byte reference did not produce all 4096 vector records")
+        header = "static const unsigned int probe_vectors[][3] = {\n"
+        header += "".join("{%du,%du,%du},\n" % record for record in struct.iter_unpack("<III", vectors))
+        (output / "reference_vectors.h").write_text(header + "};\n", encoding="ascii")
         arm64 = output / "routine-android-arm64.o"
         subprocess.run([compiler, "--no-default-config", "--target=aarch64-linux-android29", "-ffreestanding", "-nostdinc",
                         "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-c", str(source), "-o", str(arm64)], check=True)
         elf = arm64.read_bytes()
         if elf[:6] != b"\x7fELF\x02\x01" or int.from_bytes(elf[18:20], "little") != 183:
             raise ValueError("Cross-compiler did not produce an AArch64 ELF object")
+        android = output / "chusan-android-probe"
+        android_source = Path(__file__).resolve().parents[1] / "probes/android_arm64.c"
+        subprocess.run([compiler, "--no-default-config", "--target=aarch64-linux-android29", "-ffreestanding",
+                        "-nostdinc", "-nostdlib", "-static", "-fno-stack-protector", "-fuse-ld=lld",
+                        "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wl,--entry=_start",
+                        "-Wl,-z,max-page-size=16384", "-I", str(output), str(android_source), str(arm64),
+                        "-o", str(android)], check=True)
         report = {"profile": profile["id"], "source_sha256": next(item["sha256"] for item in profile["binaries"]
                                                                if item["file"] == "chusanApp.exe"),
                   "routine_va": hex(address), "routine_bytes": len(code), "comparison": comparison,
                   "android_arm64_object_compiled": True, "android_execution_verified": False,
+                  "android_executable_sha256": hashlib.sha256(android.read_bytes()).hexdigest(),
+                  "reference_vectors_sha256": hashlib.sha256(vectors).hexdigest(),
                   "full_game_translation_verified": False}
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, indent=2))

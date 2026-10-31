@@ -21,6 +21,10 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   Windows against a bounded C translation: 4,096 input cases, zero EAX or
   defined ADD-flag mismatches. The original bytes run directly on x86 hardware.
   The emitted C also compiles to a freestanding Android AArch64 ELF object.
+- A standalone ARM64 executable now embeds the 4,096 original-x86 reference
+  vectors and compares the same generated C on the device. Its ADB runner
+  verifies the executable hash, selects an authorized ARM64 device, records
+  local device evidence and removes its temporary test executable afterwards.
 - **Not verified:** execution on Android, a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -112,12 +116,21 @@ On Linux/macOS use `native-runtime/.venv/bin/python`. The inventory refuses
 writing into the source installation; a profile mismatch exits with status 2.
 It scans top-level PE files only and does not claim a complete dependency graph.
 
-The isolated hardware-reference probe currently needs Windows and llvm-mingw
+The isolated hardware-reference generator currently needs Windows and llvm-mingw
 (tested with clang 23.1.4). All generated output stays outside the game folder:
 
 ```powershell
 native-runtime/.venv/Scripts/python native-runtime/tools/probe_routine.py --exe '<private game bin>/chusanApp.exe' --profile native-runtime/profiles/chusan-local-dcd883dd.json --clang '<llvm-mingw>/bin/clang.exe' --output native-runtime/.work/routine-probe
+native-runtime/.venv/Scripts/python native-runtime/tools/test_device.py --probe-dir native-runtime/.work/routine-probe
 ```
+
+For multiple connected devices, add `--serial <adb serial>` to the second
+command. USB debugging must be enabled and this computer authorized. The ADB
+test uses a temporary path under `/data/local/tmp/`; it installs no APK and
+does not copy game assets or change Android settings. It is an ARM64 shell
+correctness fixture, not proof of an Android application lifecycle or full boot.
+Host evidence is in `report.json`; successful device evidence is written
+separately to `device-report.json` under the chosen ignored probe directory.
 
 The host runner invokes only the validated nine-byte isolated routine, not
 the game entry point or DLL initializers. It compares EAX and six defined
