@@ -32,6 +32,11 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
 - A read-only system Vulkan query identified Adreno 610 and Vulkan 1.1.128.
   The stock driver's reported extension list omits requirements in the current
   DXVK profile, including `VK_KHR_maintenance5` and `VK_KHR_maintenance6`.
+- The libadrenotools APK was built and tested on that tablet. Stock Vulkan
+  1.1.128 reports 70 device extensions; app-local Turnip reports Vulkan
+  1.3.352 and 140 extensions, including 79 absent from the stock list.
+  Both created a graphics-queue logical device. A traversal-style driver name
+  was rejected before loading. [Device verification](verification/device-results-2026-10-31.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -170,7 +175,8 @@ packages, or Python 3.12+ for driver ZIPs. It validates archive paths and ELF
 architecture, installs only the diagnostic APK, stages the selected driver in
 that app's sandbox through debug `run-as`, and probes both modes separately.
 The existing repository Turnip package is a test candidate, not a promise of
-Adreno 610 support. Extra extensions depend on the loaded driver, not on
+Adreno 610 support on every device; it loaded successfully on the connected
+tablet. Extra extensions depend on the loaded driver, not on
 libadrenotools alone; device identity and actual capabilities govern the result.
 
 The host runner invokes only the validated nine-byte isolated routine, not

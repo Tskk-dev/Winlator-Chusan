@@ -80,7 +80,7 @@ def main():
     def shell(*parts, **kwargs):
         return adb("-s", serial, "shell", *parts, **kwargs)
 
-    def run(mode):
+    def run(mode, expected_error=None):
         shell("am", "force-stop", PACKAGE)
         shell("run-as", PACKAGE, "rm", "-f", "files/vulkan-probe.json")
         shell("am", "start", "-W", "-n", PACKAGE + "/.NativeProbeActivity", "--es", "driver", mode)
@@ -89,6 +89,8 @@ def main():
             text = shell("run-as", PACKAGE, "cat", "files/vulkan-probe.json", check=False)
             if text.strip():
                 result = json.loads(text)
+                if expected_error and expected_error in result.get("error", ""):
+                    return result
                 if result.get("error") or result.get("logical_device_created") is not True:
                     raise ValueError(f"{mode} driver probe failed: {result}")
                 return result
@@ -111,6 +113,16 @@ def main():
         shell("run-as", PACKAGE, "mkdir", "-p", "files/driver")
         adb("-s", serial, "exec-in", "run-as", PACKAGE, "tar", "-xf", "-", "-C", "files/driver",
             binary_input=archive.read_bytes())
+        metadata = (extracted / "meta.json").read_bytes()
+        try:
+            adb("-s", serial, "exec-in", "run-as", PACKAGE, "tee", "files/driver/meta.json",
+                binary_input=b'{"libraryName":"../outside.so"}')
+            rejected = run("custom", expected_error="must be a .so basename")
+            if "error" not in rejected:
+                raise ValueError("Invalid custom driver path was not rejected")
+        finally:
+            shell("am", "force-stop", PACKAGE)
+            adb("-s", serial, "exec-in", "run-as", PACKAGE, "tee", "files/driver/meta.json", binary_input=metadata)
         custom = run("custom")
         identity = ("driver_id", "driver_name", "driver_info", "driver_version")
         if all(system.get(key) == custom.get(key) for key in identity):
@@ -118,12 +130,18 @@ def main():
         report = {"system": system, "custom": custom,
                   "added_extensions": sorted(set(custom["extensions"]) - set(system["extensions"])),
                   "driver_archive_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
+                  "apk_sha256": hashlib.sha256(args.apk.read_bytes()).hexdigest(),
+                  "invalid_driver_path_rejected": True,
                   "draw_verified": False, "dxvk_compatibility_verified": False}
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"system_driver": system["driver_name"], "system_api": system["api_version"],
                           "custom_driver": custom["driver_name"], "custom_api": custom["api_version"],
-                          "added_extensions": report["added_extensions"], "logical_devices_created": True}, indent=2))
+                          "system_extension_count": len(system["extensions"]),
+                          "custom_extension_count": len(custom["extensions"]),
+                          "added_extension_count": len(report["added_extensions"]),
+                          "invalid_driver_path_rejected": True,
+                          "logical_devices_created": True}, indent=2))
 
 
 if __name__ == "__main__":
