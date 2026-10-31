@@ -71,10 +71,11 @@ flowchart TD
 ```
 
 Keep guest addresses as 32-bit values and translate them through a validated
-memory arena; never cast them to Android host pointers. Unsupported calls and
-untranslated destinations must produce explicit diagnostics. Successful-looking
-placeholder services are not a working runtime. The native service adapter is
-a new implementation; replacing amdaemon removes the need to translate that
+memory arena; never cast them to Android host pointers. Unhandled calls and
+untranslated destinations must produce explicit diagnostics. Optional operations
+may use documented, counted stubs under [the stub policy](PLAN.md#stub-policy).
+Keep coherent state for credits, cards, saves, input and timing. The native
+service adapter is a new implementation; replacing amdaemon removes the need to translate that
 x86-64 process, but its observed interfaces still have to be reproduced.
 
 The iPad design provides useful boundaries and acceptance criteria. UIKit,

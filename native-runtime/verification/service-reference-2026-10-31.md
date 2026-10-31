@@ -18,10 +18,11 @@ reference material, rather than just AMDaemon DLL wrappers. Static review found:
 | IO | Current/previous values and switch/analog views | Ground/air input, cabinet buttons and LED output; cancellation semantics |
 | Network | Interface/test status progression and auth/card checks | Actual connectivity, endpoint configuration, failure and timeout states |
 
-The reference also has shortcuts we must not carry over: unconditional readiness
-and database availability, successful no-op operations, omitted bookkeeping,
-optimistic network statuses, and incomplete fallback input mappings. Its backup
-path can accept short reads, has incomplete index validation, may miss buffer
+The reference includes unconditional readiness/database availability, successful
+no-ops, omitted bookkeeping, optimistic network statuses and incomplete fallback
+input mappings. Some are suitable intentional stubs where the reached consumer
+does not require the missing side effect; keep those explicit and counted.
+Its backup path can accept short reads, has incomplete index validation, may miss buffer
 synchronization, and can report success after a write error. These are reasons
 to reproduce the useful contracts independently and test failure paths.
 
@@ -61,6 +62,7 @@ the reached IPC contracts. Do not intercept every generic Win32 mapping call
 as an amdaemon operation.
 
 Implement and qualify core readiness, input/LED, credit, card and backup state
-transitions against those observed layouts. Unsupported service operations must
-stop explicitly; storage/network errors must remain errors. The supplied C#
+transitions against those observed layouts. Stub optional operations as needed
+under the versioned policy; unhandled operations stop explicitly. A stub must
+not turn a failed save or a discarded balance change into success. The supplied C#
 code reduces behavior-design work, but does not yet satisfy this native gate.

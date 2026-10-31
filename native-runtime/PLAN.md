@@ -12,9 +12,32 @@ Its offsets and reported checks are not evidence for this build.
 
 Keep game bytes, generated translations, reference vectors and private service
 configuration in ignored local storage. Keep guest pointers 32-bit. Every
-unsupported instruction, target, import or service operation must stop with an
-actionable diagnostic. Qualification runs must not silently use an interpreter
-or success-returning placeholders.
+unhandled instruction, target, import or service operation must stop with an
+actionable diagnostic. Explicit stubs are allowed under the policy below.
+Qualification runs must not silently use an interpreter or undisclosed
+success-returning placeholders.
+
+## Stub policy
+
+Build only the behavior actually reached by startup and a playable chart.
+Optional cabinet hardware, unused sensors, reporting and optional services can
+use simple deterministic stubs. Prefer a stable default or unavailable/unsupported
+result where that matches the consumer's contract; a successful no-op is fine
+for an operation whose effect is unnecessary and whose callers tolerate it.
+
+For each admitted stub, record its exact operation/address or import, validated
+arguments, output/return values and known limitation. Count hits and report the
+first use plus a run summary, rather than logging every hot-path call. Keep the
+stub policy versioned with the game profile. Promote a stub to real behavior
+only when a reached caller needs its state or side effects.
+
+Credit/payment balances, active card identity, save contents, input transitions
+and the playback clock need coherent state. Their implementations can remain
+small; they must not acknowledge a change they discarded. Optional network
+features can remain unavailable for an offline test profile. A successful stub
+does not count as proof of original rendering, audio, persistence or networking.
+Unlisted behavior still stops explicitly, so a typo or new request cannot
+silently inherit a blanket success response.
 
 ## Ordered gates
 
@@ -58,8 +81,9 @@ or success-returning placeholders.
    input latency and thermal behavior. AOT and extra Vulkan extensions do not
    imply 60 FPS or accurate rhythm timing.
 
-Service reference inspection can proceed alongside gate 1. The service layer
-must have real behavior tests before original startup is allowed to depend on it.
+Service reference inspection can proceed alongside gate 1. Each reached service
+contract needs either a tested state implementation or an explicit tested stub;
+the full AMDaemon API does not need to exist before the first boot attempt.
 
 ## Reuse decisions
 
