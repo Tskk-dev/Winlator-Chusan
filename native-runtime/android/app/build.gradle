@@ -1,0 +1,26 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'dev.chusan.runtimeprobe'
+    compileSdk 35
+    ndkVersion '27.2.12479018'
+    defaultConfig {
+        applicationId 'dev.chusan.runtimeprobe'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    externalNativeBuild {
+        cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' }
+    }
+    // adrenotools needs actual hook .so files in ApplicationInfo.nativeLibraryDir.
+    packagingOptions { jniLibs { useLegacyPackaging = true } }
+    sourceSets { main { assets.srcDirs += '../../licenses' } }
+    buildTypes { debug { debuggable true } }
+}

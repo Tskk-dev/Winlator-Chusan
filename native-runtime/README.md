@@ -25,10 +25,17 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   vectors and compares the same generated C on the device. Its ADB runner
   verifies the executable hash, selects an authorized ARM64 device, records
   local device evidence and removes its temporary test executable afterwards.
-- **Not verified:** execution on Android, a complete calling convention or
+- The ARM64 executable passed all 4,096 original-x86 vector comparisons on the
+  connected Xiaomi `23073RPBFG`, SM6225, Android 15 / API 35. This is direct
+  ARM64 execution with zero mismatches, not emulation. Evidence remains local
+  in `.work/routine-probe/device-report.json`.
+- A read-only system Vulkan query identified Adreno 610 and Vulkan 1.1.128.
+  The stock driver's reported extension list omits requirements in the current
+  DXVK profile, including `VK_KHR_maintenance5` and `VK_KHR_maintenance6`.
+- **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
-  No Android tablet is currently connected. This is not an ARM64 execution test.
+  The routine comparison is not a full Android application/lifecycle test.
 
 The profile records identities and the bounded probe only. The generated source,
 original routine bytes, executable, ARM64 object and reports stay in ignored
@@ -84,8 +91,8 @@ small instruction pattern and is not that translator selection.
 
 ## Next observable gates
 
-1. Run the ARM64 routine proof on the actual Snapdragon 680 tablet; compare a
-   deterministic vector set and record the OS, ABI and device identity.
+1. Expand the completed isolated ARM64 routine proof beyond its four-instruction
+   pattern; retain the original-x86 vector and device identity evidence.
 2. Qualify a translation foundation with real routines covering memory,
    branches, indirect callbacks, integer flags and floating point. Fail on an
    unknown instruction or target rather than accepting a silent stub.
@@ -131,6 +138,40 @@ does not copy game assets or change Android settings. It is an ARM64 shell
 correctness fixture, not proof of an Android application lifecycle or full boot.
 Host evidence is in `report.json`; successful device evidence is written
 separately to `device-report.json` under the chosen ignored probe directory.
+
+## Optional Vulkan drivers through libadrenotools
+
+The separate `android/` project builds a small diagnostic APK with the native
+loader in `platform/android/`. It pins libadrenotools to
+`8483dfdaa2abf97ee89ad0e5f337e7b508550c6b`, including its pinned linkernsbypass
+submodule. It loads the system driver or an app-private custom driver before
+creating a Vulkan instance, uses that handle's entry points, reports the actual
+driver identity/extensions, and attempts a graphics-queue logical device.
+It does not render a frame or establish DXVK compatibility.
+
+Hook libraries are extracted using legacy JNI packaging. The hook path comes
+from `ApplicationInfo.nativeLibraryDir`; custom drivers must be under the
+app's private `files/driver/` directory. No system driver, root setting or global
+GPU configuration is changed. A custom-load error is explicit; a matching stock
+identity is not reported as a successfully replaced driver. Test each driver
+in a fresh process because Vulkan/hook state must not be switched under live
+objects. Dependency notices are included in the APK assets.
+
+Build independently of the Winlator app from the repository root:
+
+```powershell
+.\gradlew.bat -p native-runtime/android assembleDebug
+python native-runtime/tools/test_vulkan_driver.py --apk '<probe-debug.apk>' --driver app/src/main/assets/graphics_driver/adrenotools-turnip26.2.0.tzst --output native-runtime/.work/vulkan-drivers.json
+```
+
+The Android SDK and NDK 27.2.12479018 are required for a local APK build; CI
+publishes `Android-driver-probe`. The test runner needs Python 3.14 for `.tzst`
+packages, or Python 3.12+ for driver ZIPs. It validates archive paths and ELF
+architecture, installs only the diagnostic APK, stages the selected driver in
+that app's sandbox through debug `run-as`, and probes both modes separately.
+The existing repository Turnip package is a test candidate, not a promise of
+Adreno 610 support. Extra extensions depend on the loaded driver, not on
+libadrenotools alone; device identity and actual capabilities govern the result.
 
 The host runner invokes only the validated nine-byte isolated routine, not
 the game entry point or DLL initializers. It compares EAX and six defined
