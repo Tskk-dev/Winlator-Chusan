@@ -57,12 +57,24 @@ silently inherit a blanket success response.
    closure incrementally, and record the first unsupported address/import.
    Main-image TLS data exists; the inspected callback array starts with null.
    Do not invent callbacks. Qualify auxiliary DLL TLS and relocation support.
+   Active: the new bounded block runtime executes actual entry/CRT code on
+   Windows and ARM64 and iteratively records the first missing operation.
+   Four inspected C initializer table members are admitted as roots. Native
+   callback iteration, cdecl stack handling and selected CRT adapters are
+   implemented; full startup remains unproved.
+   Current shared host/ARM64 stop: `CreateEventW` after 271 executed blocks.
+   [Checkpoint](verification/startup-bringup-2026-10-31.md).
 4. **Early graphics decision.** Qualify the kit's actual D3D9 and shader code
    on Android before large-scale startup work. First prove shader draw,
    pixel readback and presentation, then a captured original draw. If that
    backend fails, evaluate a pinned DXVK Native build and guest32 COM bridge.
    Stock and app-local Turnip both create a device; neither currently reports
    maintenance5/6. This does not establish current DXVK compatibility.
+   The smallest existing proof is the kit's generic offscreen compositor
+   draw/readback contract test. Android currently excludes that test target.
+   Connect the tested driver's GIPA to the renderer/Volk custom loader; do not
+   let a custom-driver test fall back to system Vulkan. D3D9 GLSL/glslang
+   conversion and a populated HostD9Draw packet are a separate follow-up gate.
 5. **DLL/CRT and content.** Close the actual MSVC/UCRT/SEH, Cg, E-mote and CRI
    dependencies. Prove an original content frame and decoded audio with a
    measured playback clock. A clear or silent output is a separate milestone.

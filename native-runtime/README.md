@@ -46,6 +46,10 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   behavior for credits, cards, backup and IO. It is useful reference material;
   its managed interfaces do not implement the native CHUNITHM IPC/ABI.
   [Service replacement assessment](verification/service-reference-2026-10-31.md).
+- The bounded runtime now executes the actual entry/CRT path and first two C
+  initializer callbacks. Windows x64 and physical ARM64 both reach
+  `CreateEventW` after 271 blocks and 21 native API calls. This is a partial
+  startup checkpoint; [scope and identities](verification/startup-bringup-2026-10-31.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -203,6 +207,51 @@ The Android runner verifies artifact identities, copies the executable/vectors
 to a temporary device directory, compares all 4,096 records, checks seven
 terminal failures and removes the temporary files. This is a shell fixture,
 not an Android application or an original full-startup run.
+
+## Run bounded original entry/CRT startup
+
+`runtime/` now provides a small AOT block dispatcher and initial native Win32/CRT
+adapters. `prepare_runtime.py` follows direct control flow from the pinned PE
+entry, emits compiled C, maps the original sections and IAT, and records pending
+targets/translation guards. Additional roots must come from inspected code or
+data-driven callbacks. The four roots below are the actual non-null C initializer
+table members for this hash:
+
+```powershell
+python native-runtime/tools/prepare_runtime.py --exe '<private game bin>/chusanApp.exe' --kit '<pinned recomp-kit checkout>' --output native-runtime/.work/startup-bringup --max-blocks 4096 --root 0xe3bd95 --root 0xe3be62 --root 0xe3b418 --root 0x13179d0
+python native-runtime/tools/run_runtime.py --prepare-dir native-runtime/.work/startup-bringup --kit '<pinned recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
+```
+
+The runner compiles Windows x64 and Android ARM64 versions, executes the original
+entry's translated code, and records the first explicit stop. Exit zero from
+the Python runner means it captured that stop; inspect `run-report.json` for the
+actual missing operation. It does not mean the game booted. Private image/code
+and diagnostics stay in `.work/`; temporary device files are removed.
+
+The consumer uses the pinned instruction header with bounds/permission checks
+inserted into all 15 memory accessors in a private generated copy, including
+accesses made by its inline helpers. The original checkout remains unchanged.
+Every block edge returns to the budgeted dispatcher. Guest FS/TEB/TLS state is
+initialized; host SEH instrumentation is disabled and exception dispatch remains
+unsupported. The complete kit loader/import runtime/interpreter is not linked.
+
+Native `_initterm`/`_initterm_e` use guest continuations to execute translated
+callbacks, including the error-return short circuit and cdecl stack ownership.
+Initial adapters provide clocks, CRT configuration, an empty process-environment
+stub, baseline CPU-feature stubs and exit-callback registration. They do not yet
+provide process shutdown, full locale/floating-point semantics or full CRT APIs.
+
+Synthetic programs test loops/calls/returns, callback iteration/short circuit,
+instruction budget, memory protection, 53-bit control state and SIMD data moves.
+They run without game inputs and are included in CI:
+
+```powershell
+python native-runtime/tools/test_runtime.py --kit '<pinned recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
+```
+
+These checks exercise the dispatcher and selected adapters. They are separate
+from the earlier 4,096 original-x86 initializer comparisons and do not establish
+full-game boot, original graphics/audio, service compatibility or speed.
 
 ## Primary references
 

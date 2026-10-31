@@ -21,6 +21,13 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r native-runtime/requirements.txt
       - run: python -m unittest discover -s native-runtime/tests -v
+      - uses: actions/checkout@v4
+        with:
+          repository: veritr1x/recomp-kit
+          ref: 487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d
+          path: native-runtime/.work/recomp-kit
+      - name: Check compiled startup runtime with synthetic x86 programs
+        run: python native-runtime/tools/test_runtime.py --kit native-runtime/.work/recomp-kit --clang /usr/bin/clang
 
   android_driver_probe:
     runs-on: ubuntu-latest

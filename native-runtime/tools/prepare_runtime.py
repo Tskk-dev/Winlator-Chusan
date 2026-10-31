@@ -1,0 +1,223 @@
+"""Prepare bounded AOT startup from the pinned PE; keep all private output in .work."""
+import argparse
+from collections import deque
+import hashlib
+import importlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import capstone
+from capstone.x86_const import X86_OP_IMM
+import pefile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def checked_header(source):
+    """Guard kit-internal memory helpers too, without modifying the pinned checkout."""
+    declaration = "void runtime_memory_check(uint32_t address, uint32_t size, int write);\n"
+    source = source.replace("/* ---------------------------------------------------------------- memory */",
+                            declaration + "/* ---------------------------------------------------------------- memory */", 1)
+    helpers = {"rd8": (1, 0), "rd16": (2, 0), "rd32": (4, 0), "rd64": (8, 0),
+               "wr8": (1, 1), "wr16": (2, 1), "wr32": (4, 1), "wr64": (8, 1),
+               "rdf32": (4, 0), "rdf64": (8, 0), "wrf32": (4, 1), "wrf64": (8, 1),
+               "rdf80": (10, 0), "wrf80": (10, 1), "wrbcd80": (10, 1)}
+    for name, (size, write) in helpers.items():
+        pattern = rf"((?:RECOMP_HOT_INLINE|static inline) [^\n]+\b{name}\(uint32_t a[^\n]*\) \{{)"
+        source, count = re.subn(pattern, lambda match: match[1] + f"\n    runtime_memory_check(a,{size}u,{write});", source)
+        if count != 1:
+            raise ValueError("Pinned memory helper changed: " + name)
+    return source
+
+
+def decode_graph(image, roots, limit):
+    """Follow actual direct flow, splitting at every transfer; indirect flow stays pending."""
+    queue = deque(roots)
+    decoded = {}
+    instruction_bytes = {}
+    frontier = set()
+    while queue and len(decoded) < limit:
+        address = queue.popleft()
+        if address in decoded:
+            continue
+        if not image.is_exec(address):
+            frontier.add(address)
+            continue
+        pc, block = address, []
+        for _ in range(128):
+            if not image.is_exec(pc):
+                raise ValueError(f"Code falls outside executable sections: {pc:08x}")
+            got = list(image.md.disasm(image.data[pc-image.base:pc-image.base+15], pc, count=1))
+            if not got:
+                raise ValueError(f"Cannot decode {pc:08x}")
+            insn = got[0]
+            for byte in range(pc, pc + insn.size):
+                if byte in instruction_bytes and instruction_bytes[byte] != pc:
+                    raise ValueError(f"Overlapping instruction decode: {pc:08x}")
+                instruction_bytes[byte] = pc
+            block.append(insn)
+            pc += insn.size
+            jump = insn.group(capstone.CS_GRP_JUMP)
+            call = insn.group(capstone.CS_GRP_CALL)
+            if jump or call:
+                if insn.operands and insn.operands[0].type == X86_OP_IMM:
+                    queue.append(insn.operands[0].imm & 0xffffffff)
+                if call or insn.mnemonic != "jmp":
+                    queue.append(pc)
+                break
+            if insn.group(capstone.CS_GRP_RET) or insn.mnemonic in ("int3", "int", "ud2", "hlt"):
+                break
+        else:
+            queue.append(pc)
+        decoded[address] = block
+    frontier.update(address for address in queue if address not in decoded)
+    return decoded, sorted(frontier)
+
+
+def generate(executable, kit, output, roots, limit, profile=None):
+    profile = profile or json.loads((ROOT / "profiles/startup-initializer.json").read_text())
+    source_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if source_hash != profile["source_sha256"]:
+        raise ValueError("Executable differs from pinned main profile")
+    commit = subprocess.check_output(["git", "-C", str(kit), "rev-parse", "HEAD"], text=True).strip()
+    if commit != profile["kit_commit"]:
+        raise ValueError("Translator commit differs from pinned profile")
+    subprocess.run(["git", "-C", str(kit), "diff", "--exit-code", "HEAD", "--"], check=True, capture_output=True)
+    if subprocess.check_output(["git", "-C", str(kit), "ls-files", "--others", "--exclude-standard",
+                                "--", "tools/recomp", "runtime"], text=True).strip():
+        raise ValueError("Untracked translator sources")
+    sys.path.insert(0, str(kit / "tools/recomp"))
+    module = importlib.import_module("translate")
+    class RuntimeImage(module.Image):
+        def _size_word(self, nbytes, mnem):
+            # The pinned kit's recovery formatter omits its supported vector widths.
+            return {16: "xmmword", 32: "ymmword"}.get(nbytes) or super()._size_word(nbytes, mnem)
+
+    image = RuntimeImage(str(executable))
+    image.md.detail = True
+    with pefile.PE(str(executable), fast_load=True) as pe:
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                                               pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_TLS"]])
+        entry = image.base + pe.OPTIONAL_HEADER.AddressOfEntryPoint
+        imports = []
+        for dll in pe.DIRECTORY_ENTRY_IMPORT:
+            for symbol in dll.imports:
+                imports.append({"iat": symbol.address, "dll": dll.dll.decode("ascii"),
+                                "name": symbol.name.decode("ascii") if symbol.name else "#" + str(symbol.ordinal)})
+        regions = [{"base": image.base, "size": pe.OPTIONAL_HEADER.SizeOfHeaders, "flags": 1}]
+        for section in pe.sections:
+            regions.append({"base": image.base + section.VirtualAddress,
+                            "size": max(section.Misc_VirtualSize, section.SizeOfRawData),
+                            "flags": (1 if section.Characteristics & 0x40000000 else 0)
+                            | (2 if section.Characteristics & 0x80000000 else 0)})
+        tls = None
+        if hasattr(pe, "DIRECTORY_ENTRY_TLS"):
+            value = pe.DIRECTORY_ENTRY_TLS.struct
+            tls = {"start": value.StartAddressOfRawData, "end": value.EndAddressOfRawData,
+                   "index": value.AddressOfIndex, "callbacks": value.AddressOfCallBacks,
+                   "zero_fill": value.SizeOfZeroFill}
+    blocks, frontier = decode_graph(image, [entry, *roots], limit)
+    class RuntimeTranslator(module.Translator):
+        def _emit(self, fn, index, insn, mnemonic, following, live):
+            if mnemonic in ("MOVLPD", "MOVLPS", "MOVHPD", "MOVHPS"):
+                # The pinned emitter reads an unused memory destination on stores.
+                dst, src = [module.parse_operand(op) for op in insn.ops]
+                half = 2 if mnemonic in ("MOVHPD", "MOVHPS") else 0
+                if dst.kind == "xmm" and src.kind == "mem":
+                    address = module.addr_expr(src)
+                    return [f"c->xmm[{dst.reg}][{half+i}] = rd32({address} + {4*i}u);" for i in range(2)]
+                if dst.kind == "mem" and src.kind == "xmm":
+                    address = module.addr_expr(dst)
+                    return [f"wr32({address} + {4*i}u, c->xmm[{src.reg}][{half+i}]);" for i in range(2)]
+                raise module.TranslateError("Unsupported half-vector move operands")
+            return super()._emit(fn, index, insn, mnemonic, following, live)
+
+        def goto_target(self, fn, target, insn):
+            # Every edge returns to the budgeted dispatcher, including self-loops.
+            return [f"recomp_jump(c, 0x{target:08x}u); return;"]
+
+        def emit_indirect_jump(self, fn, index, insn, operand):
+            return [f"recomp_jump(c, {module.read_op(operand, 32)}); return;"]
+
+    emitter = RuntimeTranslator(image, set(blocks), SimpleNamespace(eager_flags=True, allow_unmodelled=None))
+    bodies = ['#include "runtime.h"']
+    metadata = []
+    for address, instructions in sorted(blocks.items()):
+        end = instructions[-1].address + instructions[-1].size
+        try:
+            function = module.Function(address, f"block_{address:08x}", end-address,
+                                       [image.to_insn(insn) for insn in instructions])
+            function.measure(image)
+            emitter.prepare(function, strict=True)
+            # Host setjmp frames cannot survive block dispatch. Preserve the original
+            # guest FS chain; exception dispatch itself stops until implemented.
+            function.seh_sites = {}
+            function.seh_restores = set()
+            lines = emitter.translate(function, ())
+            if any("goto L_" in line for line in lines):
+                raise ValueError("Local transfer bypasses dispatcher budget")
+            lines = [line for line in lines if not re.match(r"^L_[0-9a-f]+: ;$", line)]
+            if any("recomp_seh_" in line for line in lines):
+                raise ValueError("Host SEH instrumentation exceeds block-runtime contract")
+            if any("g_mem" in line or "x87_f" in line for line in lines):
+                raise ValueError("Unchecked memory helper needs qualification")
+            if any("recomp_unmodelled(" in line for line in lines):
+                metadata.append({"va": address, "translation_error": "Emitter inserted an unsupported-instruction guard"})
+            bodies.extend(lines)
+        except (module.TranslateError, ValueError) as error:
+            bodies.append(f"void fn_{address:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{address:08x}u); }}")
+            metadata.append({"va": address, "translation_error": str(error)})
+    bodies.append("const RuntimeBlock runtime_blocks[] = {")
+    for address, instructions in sorted(blocks.items()):
+        bodies.append(f"{{0x{address:08x}u,0x{instructions[-1].address:08x}u,fn_{address:08x}}},")
+    bodies.extend(["};", f"const uint32_t runtime_block_count = {len(blocks)}u;"])
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "x86.h").write_text(checked_header((kit / "runtime/x86.h").read_text()), encoding="utf-8")
+    (output / "blocks.c").write_text("\n".join(bodies) + "\n", encoding="utf-8")
+    header = [f"#define RUNTIME_IMAGE_BASE {image.base}u", f"#define RUNTIME_IMAGE_SIZE {image.size}u",
+              f"#define RUNTIME_ENTRY {entry}u", "static const RuntimeRegion image_regions[] = {"]
+    header.extend("{%du,%du,%du}," % (r["base"], r["size"], r["flags"]) for r in regions)
+    header.extend(["};", "static const RuntimeImport image_imports[] = {"])
+    header.extend("{%du,%s,%s}," % (r["iat"], json.dumps(r["dll"]), json.dumps(r["name"])) for r in imports)
+    header.extend(["};", "static const RuntimeTls image_tls = {%du,%du,%du,%du,%du};" % (
+        tuple(tls[k] for k in ("start", "end", "index", "callbacks", "zero_fill")) if tls else (0, 0, 0, 0, 0))])
+    (output / "image_profile.h").write_text("\n".join(header) + "\n", encoding="utf-8")
+    (output / "image.bin").write_bytes(image.data)
+    report = {"source_sha256": source_hash, "kit_commit": commit, "entry": hex(entry),
+              "blocks": len(blocks), "instructions": sum(map(len, blocks.values())),
+              "frontier": [hex(x) for x in frontier], "translation_errors": metadata,
+              "extra_roots": [hex(x) for x in roots], "eager_flags": True, "seh": "guest_chain_only",
+              "image_sha256": hashlib.sha256(image.data).hexdigest(), "full_boot_verified": False}
+    report["indirect_sites"] = [hex(insn.address) for instructions in blocks.values() for insn in instructions
+                                if (insn.group(capstone.CS_GRP_CALL) or insn.group(capstone.CS_GRP_JUMP))
+                                and insn.operands and insn.operands[0].type != X86_OP_IMM]
+    (output / "preparation.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--exe", type=Path, required=True)
+    parser.add_argument("--kit", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--max-blocks", type=int, default=2048)
+    parser.add_argument("--root", action="append", default=[], type=lambda v: int(v, 0))
+    args = parser.parse_args()
+    try:
+        if not args.output.resolve().is_relative_to(ROOT / ".work") or not 1 <= args.max_blocks <= 100000:
+            raise ValueError("Output must be under .work and block limit between 1 and 100000")
+        report = generate(args.exe.resolve(), args.kit.resolve(), args.output.resolve(), args.root, args.max_blocks)
+        print(json.dumps({key: value for key, value in report.items() if key not in ("frontier", "translation_errors", "indirect_sites")}, indent=2))
+        print(f"Pending direct targets: {len(report['frontier'])}; guarded translation errors: {len(report['translation_errors'])}")
+    except (ValueError, OSError, subprocess.SubprocessError, pefile.PEFormatError) as error:
+        print(f"Preparation failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
