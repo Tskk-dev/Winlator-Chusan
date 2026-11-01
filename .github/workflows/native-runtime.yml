@@ -33,12 +33,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: veritr1x/recomp-kit
+          ref: 487b94ac17bc10c4796dc4bce8d16ddbdeb7ec1d
+          path: native-runtime/.work/recomp-kit
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
       - name: Build the standalone native driver probe
+        env:
+          RECOMP_KIT_ROOT: ${{ github.workspace }}/native-runtime/.work/recomp-kit
         run: |
           chmod +x gradlew
           ./gradlew -p native-runtime/android assembleDebug

@@ -325,10 +325,10 @@ static void api(X86 *c,uint32_t index) {
         if(milliseconds){fprintf(stderr,"Pending event wait, timeout %u ms\n",milliseconds);stop("pending_event_wait",value);}
         api_return(c,2,258);return;
     }
-    if(!strcmp(name,"GetModuleHandleW")) {
+    if(!strcmp(name,"GetModuleHandleW") || !strcmp(name,"GetModuleHandleA")) {
         a0=rd32(c->r[4]+4);
         if(!a0){api_return(c,1,RUNTIME_IMAGE_BASE);return;}
-        char module[128];guest_name(a0,1,module);
+        char module[128];guest_name(a0,!strcmp(name,"GetModuleHandleW"),module);
         for(unsigned i=0;module[i];i++)if(module[i]>='A' && module[i]<='Z')module[i]+='a'-'A';
         if(strcmp(module,"kernel32.dll")){fprintf(stderr,"Pending module %s\n",module);stop("module_lookup",a0);}
         api_return(c,1,0x0fd80000u);return;

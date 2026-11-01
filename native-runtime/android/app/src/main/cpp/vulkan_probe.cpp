@@ -1,5 +1,8 @@
 #include "vulkan_driver.h"
 #include "gpu_probe.h"
+#if CHUSAN_D3D9_SHADER_PROBE
+#include "d3d9_shader_probe.h"
+#endif
 #include <jni.h>
 #include <vulkan/vulkan.h>
 #include <algorithm>
@@ -113,6 +116,16 @@ Java_dev_chusan_runtimeprobe_NativeProbeActivity_probe(JNIEnv* env, jclass, jstr
                 draw_error = error.what();
             }
             if (!draw.error.empty()) draw_error = draw.error;
+#if CHUSAN_D3D9_SHADER_PROBE
+            chusan::GpuProbeResult d3d9_draw{};
+            std::string d3d9_draw_error;
+            try {
+                d3d9_draw = chusan::run_d3d9_shader_probe(gipa, instance, gpu, device, family, queue);
+            } catch (const std::exception& error) {
+                d3d9_draw_error = error.what();
+            }
+            if (!d3d9_draw.error.empty()) d3d9_draw_error = d3d9_draw.error;
+#endif
             destroyDevice(device, nullptr);
             uint32_t version = properties.properties.apiVersion;
             std::ostringstream out;
@@ -131,7 +144,22 @@ Java_dev_chusan_runtimeprobe_NativeProbeActivity_probe(JNIEnv* env, jclass, jstr
                 << static_cast<unsigned>(draw.rgba[1]) << ',' << static_cast<unsigned>(draw.rgba[2]) << ','
                 << static_cast<unsigned>(draw.rgba[3]) << ']'
                 << ",\"draw_readback_coherent\":" << (draw.coherent_readback ? "true" : "false")
-                << ",\"draw_elapsed_ms\":" << draw.elapsed_ms;
+                << ",\"draw_elapsed_ms\":" << draw.elapsed_ms
+                << ",\"d3d9_ps_probe_available\":" << (CHUSAN_D3D9_SHADER_PROBE ? "true" : "false");
+#if CHUSAN_D3D9_SHADER_PROBE
+            out << ",\"d3d9_ps_shader_model\":\"ps_1_1\",\"d3d9_ps_translation_compiled\":"
+                << (d3d9_draw.translated_shader_compiled ? "true" : "false")
+                << ",\"d3d9_ps_draw_width\":4,\"d3d9_ps_draw_height\":4"
+                << ",\"d3d9_ps_expected_rgba\":[0,255,0,255],\"d3d9_ps_draw_verified\":"
+                << (d3d9_draw.verified ? "true" : "false")
+                << ",\"d3d9_ps_draw_matching_pixels\":" << d3d9_draw.matching_pixels
+                << ",\"d3d9_ps_readback_rgba\":[" << static_cast<unsigned>(d3d9_draw.rgba[0]) << ','
+                << static_cast<unsigned>(d3d9_draw.rgba[1]) << ','
+                << static_cast<unsigned>(d3d9_draw.rgba[2]) << ','
+                << static_cast<unsigned>(d3d9_draw.rgba[3]) << ']'
+                << ",\"d3d9_ps_draw_elapsed_ms\":" << d3d9_draw.elapsed_ms;
+            if (!d3d9_draw_error.empty()) out << ",\"d3d9_ps_draw_error\":" << quote(d3d9_draw_error);
+#endif
             if (!draw_error.empty()) out << ",\"draw_error\":" << quote(draw_error);
             out << ",\"extensions\":[";
             for (size_t i = 0; i < names.size(); ++i) out << (i ? "," : "") << quote(names[i]);

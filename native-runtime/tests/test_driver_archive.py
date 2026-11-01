@@ -82,6 +82,28 @@ class DriverDrawTest(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 driver.validate_draw(self.result() | change, False)
 
+    def shader_result(self):
+        return self.result() | dict(d3d9_ps_probe_available=True, d3d9_ps_translation_compiled=True,
+                d3d9_ps_shader_model="ps_1_1", d3d9_ps_draw_verified=True,
+                d3d9_ps_draw_width=4, d3d9_ps_draw_height=4,
+                d3d9_ps_expected_rgba=[0, 255, 0, 255], d3d9_ps_draw_matching_pixels=16,
+                d3d9_ps_readback_rgba=[0, 255, 0, 255])
+
+    def test_accepts_translated_shader_pixel_evidence(self):
+        driver.validate_draw(self.shader_result(), False, require_d3d9=True)
+
+    def test_rejects_missing_optional_shader_when_required(self):
+        with self.assertRaisesRegex(ValueError, "D3D9 pixel shader"):
+            driver.validate_draw(self.result(), False, require_d3d9=True)
+
+    def test_rejects_compile_only_and_incomplete_translated_shader_draw(self):
+        for change in (dict(d3d9_ps_translation_compiled=False), dict(d3d9_ps_draw_verified=False),
+                       dict(d3d9_ps_draw_matching_pixels=15), dict(d3d9_ps_draw_width=8),
+                       dict(d3d9_ps_readback_rgba=[255, 0, 0, 255]),
+                       dict(d3d9_ps_shader_model="ps_2_0"), dict(d3d9_ps_draw_error="timeout")):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "D3D9 pixel shader"):
+                driver.validate_draw(self.shader_result() | change, False)
+
 
 if __name__ == "__main__":
     unittest.main()

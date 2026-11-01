@@ -34,9 +34,13 @@ def checked_header(source):
     return source
 
 
-def decode_graph(image, roots, limit, thunks=frozenset(), readonly=()):
+def decode_graph(image, roots, limit, thunks=frozenset(), readonly=(), retained=(), priority=()):
     """Follow actual direct flow, splitting at every transfer; indirect flow stays pending."""
     queue = deque(roots)
+    keep = deque(dict.fromkeys(retained))
+    urgent = deque(priority)
+    urgent_seen = set()
+    direct_edges = {}
     decoded = {}
     instruction_bytes = {}
     frontier = set()
@@ -58,14 +62,29 @@ def decode_graph(image, roots, limit, thunks=frozenset(), readonly=()):
                     break
         table_cache[value]=found
         return found
-    while queue and len(decoded) < limit:
-        address = queue.popleft()
+    while keep or urgent or queue:
+        is_urgent = False
+        if keep:
+            address = keep.popleft()
+        elif urgent:
+            address = urgent.popleft()
+            if address in urgent_seen:
+                continue
+            urgent_seen.add(address)
+            is_urgent = True
+        else:
+            address = queue.popleft()
         if address in decoded:
+            if is_urgent:
+                urgent.extend(direct_edges[address])
             continue
+        if len(decoded) == limit:
+            frontier.add(address)
+            break
         if not image.is_exec(address):
             frontier.add(address)
             continue
-        pc, block = address, []
+        pc, block, direct = address, [], []
         for _ in range(128):
             if not image.is_exec(pc):
                 raise ValueError(f"Code falls outside executable sections: {pc:08x}")
@@ -87,16 +106,18 @@ def decode_graph(image, roots, limit, thunks=frozenset(), readonly=()):
             call = insn.group(capstone.CS_GRP_CALL)
             if jump or call:
                 if insn.operands and insn.operands[0].type == X86_OP_IMM:
-                    queue.append(insn.operands[0].imm & 0xffffffff)
+                    direct.append(insn.operands[0].imm & 0xffffffff)
                 if call or insn.mnemonic != "jmp":
-                    queue.append(pc)
+                    direct.append(pc)
                 break
             if insn.group(capstone.CS_GRP_RET) or insn.mnemonic in ("int3", "int", "ud2", "hlt"):
                 break
         else:
-            queue.append(pc)
+            direct.append(pc)
         decoded[address] = block
-    frontier.update(address for address in queue if address not in decoded)
+        direct_edges[address] = direct
+        (urgent if is_urgent else queue).extend(direct)
+    frontier.update(address for pending in (keep,urgent,queue) for address in pending if address not in decoded)
     return decoded, sorted(frontier)
 
 
@@ -182,6 +203,7 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
             tls = {"start": value.StartAddressOfRawData, "end": value.EndAddressOfRawData,
                    "index": value.AddressOfIndex, "callbacks": value.AddressOfCallBacks,
                    "zero_fill": value.SizeOfZeroFill}
+    explicit_roots=list(roots)
     table_metadata=[]
     for start,end in tables:
         callbacks,description=table_roots(image,start,end)
@@ -190,11 +212,27 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
     thunks,ilt_metadata=ilt_entries(image,*ilt) if ilt else (frozenset(),None)
     # Broad table discovery starts after a baseline exists, so its cutoff cannot displace startup code.
     readonly=[(r["base"],r["base"]+r["size"]) for r in regions if r["flags"]==1] if previous else []
-    blocks, frontier = decode_graph(image, [entry,*previous,*roots], limit,thunks,readonly)
+    priority=explicit_roots if previous else []
+    blocks, frontier = decode_graph(image, [entry,*roots], limit,thunks,readonly,previous,priority)
     if not set(previous).issubset(blocks):
         raise ValueError("Block cutoff omitted retained code")
     class RuntimeTranslator(module.Translator):
         def _emit(self, fn, index, insn, mnemonic, following, live):
+            if mnemonic == "PADDD":
+                dst,src=[module.parse_operand(op) for op in insn.ops]
+                if dst.kind=="xmm" and src.kind in ("mem","xmm"):
+                    prefix=f"paddd_{index}"
+                    lines=[]
+                    if src.kind=="mem":
+                        lines.extend([f"uint32_t {prefix}_address = {module.addr_expr(src)};",
+                                      f"if ({prefix}_address & 15u) {{ recomp_int(c,13); return; }}",
+                                      f"runtime_memory_check({prefix}_address,16u,0);"])
+                        values=[f"rd32({prefix}_address+{4*lane}u)" for lane in range(4)]
+                    else:
+                        values=[f"c->xmm[{src.reg}][{lane}]" for lane in range(4)]
+                    lines.append(f"uint32_t {prefix}_source[4] = {{"+",".join(values)+"};")
+                    lines.extend(f"c->xmm[{dst.reg}][{lane}] += {prefix}_source[{lane}];" for lane in range(4))
+                    return lines
             if mnemonic in ("MOVLPD", "MOVLPS", "MOVHPD", "MOVHPS"):
                 # The pinned emitter reads an unused memory destination on stores.
                 dst, src = [module.parse_operand(op) for op in insn.ops]
@@ -273,6 +311,7 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
               "image_sha256": hashlib.sha256(image.data).hexdigest(), "full_boot_verified": False}
     report["initializer_tables"]=table_metadata
     report["retained_blocks"]=len(previous)
+    report["priority_roots"]=[hex(address) for address in priority]
     report["readonly_callback_recovery"]=bool(previous)
     report["block_addresses"]=[hex(address) for address in sorted(blocks)]
     report["incremental_link_table"]=ilt_metadata

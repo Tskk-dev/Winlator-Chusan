@@ -1,0 +1,1 @@
+This diagnostic APK includes portions of the pinned recomp-kit D3D9 shader parser and GLSL generator, and glslang 16.6.0 for GLSL-to-SPIR-V compilation. Their license texts are included beside this notice. The D3D9 probe is a limited pixel-shader translation proof; it is not the original game or a full D3D9 renderer.

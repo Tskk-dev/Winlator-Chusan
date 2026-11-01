@@ -38,6 +38,8 @@ struct Resources {
     PFN_vkDestroyShaderModule destroy_shader = nullptr;
     PFN_vkDestroyPipeline destroy_pipeline = nullptr;
     PFN_vkDestroyPipelineLayout destroy_pipeline_layout = nullptr;
+    PFN_vkDestroyDescriptorSetLayout destroy_descriptor_set_layout = nullptr;
+    PFN_vkDestroyDescriptorPool destroy_descriptor_pool = nullptr;
     PFN_vkDestroyRenderPass destroy_render_pass = nullptr;
     PFN_vkDestroyFramebuffer destroy_framebuffer = nullptr;
     PFN_vkDestroyImageView destroy_image_view = nullptr;
@@ -50,6 +52,9 @@ struct Resources {
     VkShaderModule fragment_shader = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
     VkRenderPass render_pass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkImageView image_view = VK_NULL_HANDLE;
@@ -57,20 +62,30 @@ struct Resources {
     VkDeviceMemory image_memory = VK_NULL_HANDLE;
     VkBuffer readback = VK_NULL_HANDLE;
     VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+    VkBuffer constants_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory constants_memory = VK_NULL_HANDLE;
+    VkBuffer params_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory params_memory = VK_NULL_HANDLE;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
 
     ~Resources() {
         if (fence) destroy_fence(device, fence, nullptr);
         if (command_pool) destroy_command_pool(device, command_pool, nullptr);
+        if (descriptor_pool) destroy_descriptor_pool(device, descriptor_pool, nullptr);
         if (readback) destroy_buffer(device, readback, nullptr);
         if (readback_memory) free_memory(device, readback_memory, nullptr);
+        if (constants_buffer) destroy_buffer(device, constants_buffer, nullptr);
+        if (constants_memory) free_memory(device, constants_memory, nullptr);
+        if (params_buffer) destroy_buffer(device, params_buffer, nullptr);
+        if (params_memory) free_memory(device, params_memory, nullptr);
         if (framebuffer) destroy_framebuffer(device, framebuffer, nullptr);
         if (image_view) destroy_image_view(device, image_view, nullptr);
         if (image) destroy_image(device, image, nullptr);
         if (image_memory) free_memory(device, image_memory, nullptr);
         if (pipeline) destroy_pipeline(device, pipeline, nullptr);
         if (pipeline_layout) destroy_pipeline_layout(device, pipeline_layout, nullptr);
+        if (descriptor_set_layout) destroy_descriptor_set_layout(device, descriptor_set_layout, nullptr);
         if (fragment_shader) destroy_shader(device, fragment_shader, nullptr);
         if (vertex_shader) destroy_shader(device, vertex_shader, nullptr);
         if (render_pass) destroy_render_pass(device, render_pass, nullptr);
@@ -112,7 +127,13 @@ VkShaderModule shader_module(VkDevice device, PFN_vkCreateShaderModule create_sh
 
 GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance,
                              VkPhysicalDevice physical, VkDevice device,
-                             uint32_t queue_family, VkQueue queue) {
+                             uint32_t queue_family, VkQueue queue,
+                             const GpuProbeShaders* shaders) {
+    if (shaders && (!shaders->vertex_spirv || !shaders->vertex_word_count ||
+                    !shaders->fragment_spirv || !shaders->fragment_word_count ||
+                    !shaders->fragment_constants || !shaders->fragment_constants_size ||
+                    !shaders->fragment_params || !shaders->fragment_params_size))
+        throw std::runtime_error("Incomplete custom probe shader inputs");
     auto gdpa = instance_entry<PFN_vkGetDeviceProcAddr>(gipa, instance, "vkGetDeviceProcAddr");
     auto get_memory_properties = instance_entry<PFN_vkGetPhysicalDeviceMemoryProperties>(gipa, instance,
                                                                                          "vkGetPhysicalDeviceMemoryProperties");
@@ -137,15 +158,21 @@ GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance
     r.destroy_framebuffer = device_entry<PFN_vkDestroyFramebuffer>(gdpa, device, "vkDestroyFramebuffer");
     r.destroy_pipeline = device_entry<PFN_vkDestroyPipeline>(gdpa, device, "vkDestroyPipeline");
     r.destroy_pipeline_layout = device_entry<PFN_vkDestroyPipelineLayout>(gdpa, device, "vkDestroyPipelineLayout");
+    r.destroy_descriptor_set_layout = device_entry<PFN_vkDestroyDescriptorSetLayout>(gdpa, device, "vkDestroyDescriptorSetLayout");
+    r.destroy_descriptor_pool = device_entry<PFN_vkDestroyDescriptorPool>(gdpa, device, "vkDestroyDescriptorPool");
     r.destroy_command_pool = device_entry<PFN_vkDestroyCommandPool>(gdpa, device, "vkDestroyCommandPool");
     r.destroy_fence = device_entry<PFN_vkDestroyFence>(gdpa, device, "vkDestroyFence");
 
     GpuProbeResult result{};
     auto started = std::chrono::steady_clock::now();
-    r.vertex_shader = shader_module(device, create_shader, probe_shader::vertex,
-                                    sizeof(probe_shader::vertex) / sizeof(uint32_t));
-    r.fragment_shader = shader_module(device, create_shader, probe_shader::fragment,
-                                      sizeof(probe_shader::fragment) / sizeof(uint32_t));
+    r.vertex_shader = shaders
+        ? shader_module(device, create_shader, shaders->vertex_spirv, shaders->vertex_word_count)
+        : shader_module(device, create_shader, probe_shader::vertex,
+                        sizeof(probe_shader::vertex) / sizeof(uint32_t));
+    r.fragment_shader = shaders
+        ? shader_module(device, create_shader, shaders->fragment_spirv, shaders->fragment_word_count)
+        : shader_module(device, create_shader, probe_shader::fragment,
+                        sizeof(probe_shader::fragment) / sizeof(uint32_t));
 
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -229,10 +256,103 @@ GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance
     framebuffer_info.layers = 1;
     require(create_framebuffer(device, &framebuffer_info, nullptr, &r.framebuffer), "Create probe framebuffer");
 
+    VkDescriptorSetLayoutBinding descriptor_bindings[2]{};
+    VkDescriptorSetLayoutCreateInfo descriptor_layout_info{};
+    if (shaders) {
+        auto create_descriptor_set_layout = device_entry<PFN_vkCreateDescriptorSetLayout>(gdpa, device, "vkCreateDescriptorSetLayout");
+        descriptor_bindings[0] = {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        descriptor_bindings[1] = {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        descriptor_layout_info.bindingCount = 2;
+        descriptor_layout_info.pBindings = descriptor_bindings;
+        require(create_descriptor_set_layout(device, &descriptor_layout_info, nullptr, &r.descriptor_set_layout),
+                "Create D3D9 descriptor layout");
+    }
     VkPipelineLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    if (shaders) {
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts = &r.descriptor_set_layout;
+    }
     auto create_pipeline_layout = device_entry<PFN_vkCreatePipelineLayout>(gdpa, device, "vkCreatePipelineLayout");
     require(create_pipeline_layout(device, &layout_info, nullptr, &r.pipeline_layout), "Create probe pipeline layout");
+
+    if (shaders) {
+        auto create_buffer = device_entry<PFN_vkCreateBuffer>(gdpa, device, "vkCreateBuffer");
+        auto get_buffer_requirements = device_entry<PFN_vkGetBufferMemoryRequirements>(gdpa, device, "vkGetBufferMemoryRequirements");
+        auto bind_buffer_memory = device_entry<PFN_vkBindBufferMemory>(gdpa, device, "vkBindBufferMemory");
+        auto map_memory = device_entry<PFN_vkMapMemory>(gdpa, device, "vkMapMemory");
+        auto unmap_memory = device_entry<PFN_vkUnmapMemory>(gdpa, device, "vkUnmapMemory");
+        auto flush_memory = device_entry<PFN_vkFlushMappedMemoryRanges>(gdpa, device, "vkFlushMappedMemoryRanges");
+        auto create_uniform = [&](VkDeviceSize size, const void* bytes, VkBuffer* buffer, VkDeviceMemory* memory) {
+            VkBufferCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            info.size = size;
+            info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            require(create_buffer(device, &info, nullptr, buffer), "Create D3D9 uniform buffer");
+            VkMemoryRequirements requirements{};
+            get_buffer_requirements(device, *buffer, &requirements);
+            VkMemoryPropertyFlags flags = 0;
+            VkMemoryAllocateInfo allocation{};
+            allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocation.allocationSize = requirements.size;
+            allocation.memoryTypeIndex = memory_type(memory_properties, requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, flags);
+            require(allocate_memory(device, &allocation, nullptr, memory), "Allocate D3D9 uniform memory");
+            require(bind_buffer_memory(device, *buffer, *memory, 0), "Bind D3D9 uniform memory");
+            void* mapped = nullptr;
+            require(map_memory(device, *memory, 0, VK_WHOLE_SIZE, 0, &mapped), "Map D3D9 uniform memory");
+            std::memcpy(mapped, bytes, static_cast<size_t>(size));
+            if (!(flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                VkMappedMemoryRange range{};
+                range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+                range.memory = *memory;
+                range.offset = 0;
+                range.size = VK_WHOLE_SIZE;
+                const VkResult flush = flush_memory(device, 1, &range);
+                if (flush != VK_SUCCESS) {
+                    unmap_memory(device, *memory);
+                    require(flush, "Flush D3D9 uniform memory");
+                }
+            }
+            unmap_memory(device, *memory);
+        };
+        create_uniform(shaders->fragment_constants_size, shaders->fragment_constants,
+                       &r.constants_buffer, &r.constants_memory);
+        create_uniform(shaders->fragment_params_size, shaders->fragment_params,
+                       &r.params_buffer, &r.params_memory);
+
+        auto create_descriptor_pool = device_entry<PFN_vkCreateDescriptorPool>(gdpa, device, "vkCreateDescriptorPool");
+        VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2};
+        VkDescriptorPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.maxSets = 1;
+        pool_info.poolSizeCount = 1;
+        pool_info.pPoolSizes = &pool_size;
+        require(create_descriptor_pool(device, &pool_info, nullptr, &r.descriptor_pool), "Create D3D9 descriptor pool");
+        auto allocate_descriptor_sets = device_entry<PFN_vkAllocateDescriptorSets>(gdpa, device, "vkAllocateDescriptorSets");
+        VkDescriptorSetAllocateInfo set_info{};
+        set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        set_info.descriptorPool = r.descriptor_pool;
+        set_info.descriptorSetCount = 1;
+        set_info.pSetLayouts = &r.descriptor_set_layout;
+        require(allocate_descriptor_sets(device, &set_info, &r.descriptor_set), "Allocate D3D9 descriptor set");
+        VkDescriptorBufferInfo buffer_infos[2]{};
+        buffer_infos[0] = {r.constants_buffer, 0, shaders->fragment_constants_size};
+        buffer_infos[1] = {r.params_buffer, 0, shaders->fragment_params_size};
+        VkWriteDescriptorSet writes[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = r.descriptor_set;
+            writes[i].dstBinding = i + 2;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[i].pBufferInfo = &buffer_infos[i];
+        }
+        device_entry<PFN_vkUpdateDescriptorSets>(gdpa, device, "vkUpdateDescriptorSets")(
+            device, 2, writes, 0, nullptr);
+    }
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -341,6 +461,10 @@ GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance
         command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
     device_entry<PFN_vkCmdBindPipeline>(gdpa, device, "vkCmdBindPipeline")(
         command, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline);
+    if (shaders)
+        device_entry<PFN_vkCmdBindDescriptorSets>(gdpa, device, "vkCmdBindDescriptorSets")(
+            command, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline_layout, 0, 1,
+            &r.descriptor_set, 0, nullptr);
     device_entry<PFN_vkCmdDraw>(gdpa, device, "vkCmdDraw")(command, 3, 1, 0, 0);
     device_entry<PFN_vkCmdEndRenderPass>(gdpa, device, "vkCmdEndRenderPass")(command);
     VkBufferImageCopy copy{};
@@ -401,7 +525,8 @@ GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance
     const auto* pixels = static_cast<const uint8_t*>(mapped);
     result.matching_pixels = 0;
     for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
-        if (std::memcmp(pixels + i * 4, kExpected, 4) == 0) ++result.matching_pixels;
+        const uint8_t* expected = shaders ? shaders->expected_rgba : kExpected;
+        if (std::memcmp(pixels + i * 4, expected, 4) == 0) ++result.matching_pixels;
     }
     std::memcpy(result.rgba, pixels + ((kHeight / 2) * kWidth + kWidth / 2) * 4, 4);
     unmap_memory(device, r.readback_memory);
@@ -409,7 +534,7 @@ GpuProbeResult run_gpu_probe(PFN_vkGetInstanceProcAddr gipa, VkInstance instance
     result.verified = result.matching_pixels == kWidth * kHeight;
     result.elapsed_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count());
-    if (!result.verified) result.error = "Readback did not match red fragment output across all 16 pixels";
+    if (!result.verified) result.error = "Readback did not match fragment output across all 16 pixels";
     return result;
 }
 }

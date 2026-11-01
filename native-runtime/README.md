@@ -57,6 +57,10 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   All 35 tooling tests and 40 synthetic scenarios pass. The selected-driver
   GPU test also passes all 16 pixels with stock and Turnip.
   [Graphics evidence](verification/vulkan-draw-2026-11-01.md).
+- A later host-only continuation completes 674 C++ callbacks and stops at the
+  unresolved `CreateHardLinkW` capability lookup. The new ARM64 startup comparison
+  is pending; 425 remains the last shared startup checkpoint.
+  [Continuation evidence](verification/constructor-continuation-2026-11-01.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -168,7 +172,9 @@ driver identity/extensions, creates a graphics-queue logical device, draws a
 4x4 triangle and verifies every pixel through a staging-buffer readback.
 Both stock and custom drivers passed on the target tablet.
 [Draw verification](verification/vulkan-draw-2026-11-01.md).
-D3D9 and DXVK compatibility remain unverified.
+An optional kit-translated D3D9 pixel shader also passes compilation and 16/16
+pixel readback with both drivers. [Shader verification](verification/d3d9-shader-2026-11-01.md).
+Full D3D9 and DXVK compatibility remain unverified.
 
 Hook libraries are extracted using legacy JNI packaging. The hook path comes
 from `ApplicationInfo.nativeLibraryDir`; custom drivers must be under the
@@ -184,6 +190,12 @@ Build independently of the Winlator app from the repository root:
 .\gradlew.bat -p native-runtime/android assembleDebug
 python native-runtime/tools/test_vulkan_driver.py --apk '<probe-debug.apk>' --driver app/src/main/assets/graphics_driver/adrenotools-turnip26.2.0.tzst --output native-runtime/.work/vulkan-drivers.json
 ```
+
+Set `RECOMP_KIT_ROOT` to a clean checkout of the pinned kit (or pass
+`-PrecompKitRoot=<path>`) to build the translated D3D9 pixel shader proof.
+Then add `--require-d3d9` to the device test. It requires shader compilation and
+complete green pixel evidence separately from the generic red draw. glslang is
+pinned to `e1b562a8bed273a02f30b59b66a5d499793cede5` (16.6.0).
 
 The Android SDK and NDK 27.2.12479018 are required for a local APK build; CI
 publishes `Android-driver-probe`. The test runner needs Python 3.14 for `.tzst`

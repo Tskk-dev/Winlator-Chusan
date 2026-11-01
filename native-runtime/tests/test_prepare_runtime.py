@@ -24,6 +24,36 @@ class SyntheticImage:
 
 
 class RuntimePreparationTest(unittest.TestCase):
+    def priority_image(self):
+        code=bytearray(b"\xcc"*64)
+        code[0:6]=bytes.fromhex("e80b000000c3")
+        code[16:21]=bytes.fromhex("e90b000000")
+        code[32:38]=bytes.fromhex("e803000000c3")
+        code[40]=0xc3
+        code[48:54]=bytes.fromhex("e803000000c3")
+        code[56]=0xc3
+        return SyntheticImage(code.hex())
+
+    def test_observed_root_closure_precedes_unrelated_cold_expansion(self):
+        image=self.priority_image();base=image.base
+        retained=[base,base+5,base+16]
+        blocks,frontier=prepare.decode_graph(image,[base],6,retained=retained,priority=[base+48])
+        self.assertEqual(set(blocks),set(retained+[base+48,base+53,base+56]))
+        self.assertEqual(frontier,[base+32])
+
+    def test_priority_walk_follows_direct_edges_through_retained_blocks(self):
+        image=self.priority_image();base=image.base
+        retained=[base,base+5,base+16]
+        blocks,frontier=prepare.decode_graph(image,[base,base+48],6,retained=retained,priority=[base+16])
+        self.assertEqual(set(blocks),set(retained+[base+32,base+37,base+40]))
+        self.assertEqual(frontier,[base+48])
+
+    def test_retained_priority_loop_is_finite(self):
+        image=SyntheticImage("ebfe")
+        blocks,frontier=prepare.decode_graph(image,[image.base],1,retained=[image.base],priority=[image.base])
+        self.assertEqual(set(blocks),{image.base})
+        self.assertEqual(frontier,[])
+
     def test_follows_call_callee_and_continuation(self):
         image = SyntheticImage("e801000000c3c3")
         blocks, frontier = prepare.decode_graph(image, [image.base], 10)

@@ -16,7 +16,7 @@ from test_device import select_device
 PACKAGE = "dev.chusan.runtimeprobe"
 
 
-def validate_draw(result, custom):
+def validate_draw(result, custom, require_d3d9=False):
     if (result.get("error") or result.get("draw_error")
             or result.get("custom_requested") is not custom
             or result.get("logical_device_created") is not True
@@ -25,6 +25,17 @@ def validate_draw(result, custom):
             or result.get("draw_matching_pixels") != 16
             or result.get("draw_readback_rgba") != [255, 0, 0, 255]):
         raise ValueError(f"Driver draw/readback probe failed: {result}")
+    if require_d3d9 or result.get("d3d9_ps_probe_available") is True:
+        if (result.get("d3d9_ps_probe_available") is not True
+                or result.get("d3d9_ps_translation_compiled") is not True
+                or result.get("d3d9_ps_shader_model") != "ps_1_1"
+                or result.get("d3d9_ps_draw_verified") is not True
+                or (result.get("d3d9_ps_draw_width"), result.get("d3d9_ps_draw_height")) != (4, 4)
+                or result.get("d3d9_ps_expected_rgba") != [0, 255, 0, 255]
+                or result.get("d3d9_ps_draw_matching_pixels") != 16
+                or result.get("d3d9_ps_readback_rgba") != [0, 255, 0, 255]
+                or result.get("d3d9_ps_draw_error")):
+            raise ValueError(f"Translated D3D9 pixel shader probe failed: {result}")
 
 
 def extract_driver(archive, destination):
@@ -79,6 +90,8 @@ def main():
     parser.add_argument("--driver", type=Path, required=True, help="Adrenotools .zip or repository .tzst package")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--serial")
+    parser.add_argument("--require-d3d9", action="store_true",
+                        help="Require the optional translated D3D9 pixel shader draw/readback")
     args = parser.parse_args()
 
     def adb(*parts, check=True, binary_input=None, timeout=30):
@@ -102,7 +115,7 @@ def main():
                 result = json.loads(text)
                 if expected_error and expected_error in result.get("error", ""):
                     return result
-                validate_draw(result, mode == "custom")
+                validate_draw(result, mode == "custom", args.require_d3d9)
                 return result
             time.sleep(0.25)
         raise TimeoutError(f"{mode} driver probe did not publish a result")
@@ -142,6 +155,7 @@ def main():
                   "driver_archive_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
                   "apk_sha256": hashlib.sha256(args.apk.read_bytes()).hexdigest(),
                   "invalid_driver_path_rejected": True,
+                  "d3d9_pixel_shader_verified": all(r.get("d3d9_ps_draw_verified") is True for r in (system, custom)),
                   "draw_verified": True, "d3d9_verified": False, "dxvk_compatibility_verified": False}
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -151,7 +165,8 @@ def main():
                           "custom_extension_count": len(custom["extensions"]),
                           "added_extension_count": len(report["added_extensions"]),
                           "invalid_driver_path_rejected": True,
-                          "logical_devices_created": True, "draw_verified": True}, indent=2))
+                          "logical_devices_created": True, "draw_verified": True,
+                          "d3d9_pixel_shader_verified": report["d3d9_pixel_shader_verified"]}, indent=2))
 
 
 if __name__ == "__main__":

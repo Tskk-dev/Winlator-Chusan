@@ -9,6 +9,8 @@ import struct
 import subprocess
 import sys
 import uuid
+import capstone
+from capstone.x86_const import X86_OP_MEM
 
 from prepare_runtime import generate, ROOT
 from run_runtime import build, freeze_source, run_stop
@@ -135,6 +137,24 @@ def calendar_program(year,invalid=False):
     return {0:code,0x700:struct.pack("<9i",65,0,4,1,0,year-1900,0,0,0)},["_mktime64","_errno"]
 
 
+def paddd_program(source=0x401710):
+    code=bytearray.fromhex("f30f6f0500174000f30f6f0d1017400039c0f9660ffe05")
+    code.extend(struct.pack("<I",source))
+    code.extend(bytes.fromhex("660ffec1660ffec99c5af30f7f0520174000f30f7f0d3017400089d025d5080000"))
+    branches=[]
+    def compare(value):
+        code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85")
+        branches.append(len(code));code.extend(bytes(4))
+    compare(0x45)  # Defined arithmetic flags from CMP/STC must survive the vector additions.
+    for index,value in enumerate((1,0x80000001,0x80000000,0xfedcba97,2,2,0,0xfdb97530)):
+        code.extend(b"\xa1"+struct.pack("<I",0x401720+4*index));compare(value)
+    code.extend(bytes.fromhex("b80d600000c3"))
+    failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+    for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+    return {0:code,0x700:struct.pack("<4I",0xffffffff,0x7fffffff,0x80000000,0x01234567),
+            0x710:struct.pack("<4I",1,1,0x80000000,0xfedcba98)},["GetLastError"]
+
+
 def scenarios():
     loop = bytearray.fromhex("b800000000b905000000e8110000004975f8c3")
     loop.extend(bytes(0x20-len(loop)))
@@ -149,6 +169,11 @@ def scenarios():
     yield "simd-copy", {0: simd_copy, 0x1c0: struct.pack("<IIII", 1, 2, 3, 0x10203040)}, [], True, None, "entry_returned", "0x10203040"
     half_store = bytes.fromhex("f30f6f05c01140000f1305d01140000f1705d8114000a1dc114000c3")
     yield "simd-half-store", {0: half_store, 0x1c0: struct.pack("<IIII", 1, 2, 3, 0x10203040)}, [], True, None, "entry_returned", "0x10203040"
+    for name,address,stop,target in (("simd-paddd",0x401710,"entry_returned","0x0000600d"),
+                                     ("simd-paddd-alignment",0x401711,"guest_exception","0x0000000d"),
+                                     ("simd-paddd-memory",0x402000,"read_permission","0x00402000")):
+        patches,imports=paddd_program(address)
+        yield name,patches,[],True,imports,stop,target
     critical = bytes.fromhex("6a0068a00f00006800134000ff155811400083c40ca104134000c3")
     yield "critical-init", {0: critical}, [], True, "__vcrt_InitializeCriticalSectionEx", "entry_returned", "0xffffffff"
     yield "critical-init-win32", {0:bytes.fromhex("6800134000ff1558114000a104134000c3")}, [], True, "InitializeCriticalSection", "entry_returned", "0xffffffff"
@@ -209,8 +234,10 @@ def scenarios():
     for offset,name in ((0x700,b".Alpha\0"),(0x740,b".Beta\0"),(0x780,b"!Alpha\0"),(0x7c0,b".\x80\0")):
         patches[offset]=struct.pack("<I",0xdeadbeef)+name
     yield "type-info",patches,[],False,imports,"entry_returned","0x0000600d"
-    module = bytes.fromhex("6800134000ff155811400085c00f95c00fb6c0c3")
-    yield "kernel-module", {0: module, 0x300: "kernel32.dll\0".encode("utf-16-le")}, [], False, "GetModuleHandleW", "entry_returned", "0x00000001"
+    module = bytes.fromhex("6800134000ff1558114000c3")
+    for suffix,api,encoding in (("","GetModuleHandleW","utf-16-le"),("-ansi","GetModuleHandleA","ascii")):
+        yield "kernel-module"+suffix, {0: module, 0x300: "KERNEL32.DLL\0".encode(encoding)}, [], False, api, "entry_returned", "0x0fd80000"
+        yield "main-module"+suffix, {0: bytes.fromhex("6a00ff1558114000c3")}, [], False, api, "entry_returned", "0x00400000"
     optional = bytes.fromhex("6800134000680000d80fff155811400064a134000000c3")
     yield "optional-export", {0: optional, 0x300: b"InitializeConditionVariable\0"}, [], False, "GetProcAddress", "entry_returned", "0x0000007f"
     registration=bytearray()
@@ -304,6 +331,23 @@ def main():
         if name in ("initterm", "initterm-e"):
             assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
         results[name] = {"host": observed}
+        if os.name=="nt" and name.startswith("simd-paddd"):
+            oracle=output/"original-x86.exe"
+            subprocess.run([str(args.clang.resolve()),"--target=i686-w64-windows-gnu","-O1","-Wall","-Wextra","-Werror",
+                            str(ROOT/"tests/x86_simd_oracle_win.c"),"-Wl,--image-base,0x30000000",
+                            "-Wl,--disable-dynamicbase","-o",str(oracle)],check=True)
+            decoder=capstone.Cs(capstone.CS_ARCH_X86,capstone.CS_MODE_32);decoder.detail=True
+            relocations=[]
+            for instruction in decoder.disasm(bytes(patches[0]),0x401000):
+                if any(op.type==X86_OP_MEM and not op.mem.base and not op.mem.index
+                       and 0x400000<=op.mem.disp<0x403000 for op in instruction.operands):
+                    assert instruction.disp_size==4
+                    relocations.append(instruction.address-0x400000+instruction.disp_offset)
+            relocation_file=output/"oracle-relocations.bin"
+            relocation_file.write_bytes(struct.pack("<"+"I"*len(relocations),*relocations))
+            reference=json.loads(subprocess.check_output([str(oracle),str(output/"image.bin"),str(relocation_file)],text=True,timeout=30))
+            assert reference==({"return":0x600d} if name=="simd-paddd" else {"fault":"0xc0000005"}),reference
+            results[name]["original_x86"]=reference
         if serial:
             android = build(args.android_clang.resolve(), [], kit, output, android=True)
             remote = "/data/local/tmp/chusan-synthetic-" + uuid.uuid4().hex[:12]

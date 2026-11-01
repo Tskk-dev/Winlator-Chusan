@@ -39,6 +39,8 @@ def build(compiler, target, kit, output, android=False):
              "-I", str(ROOT / "runtime"), "-I", str(output), "-I", str(kit / "runtime")]
     prefix = "android" if android else "windows"
     command = [str(compiler), *target, *flags]
+    # The emitter snapshots every shuffle lane, including lanes the selector discards.
+    generated_command = [*command, "-Wno-unused-variable"]
     preparation=json.loads((output/"preparation.json").read_text())
     units=preparation.get("translation_units",{"blocks.c":sha(output/"blocks.c")})
     objects=[]
@@ -47,10 +49,10 @@ def build(compiler, target, kit, output, android=False):
             raise ValueError("Invalid or changed prepared translation unit")
         stamp = output / (prefix + "-" + Path(filename).stem + ".sha256")
         identity = hashlib.sha256((expected + sha(ROOT / "runtime/runtime.h")
-                                   + sha(output / "x86.h") + str(command)).encode()).hexdigest()
+                                   + sha(output / "x86.h") + str(generated_command)).encode()).hexdigest()
         object_file = output / (prefix + "-" + Path(filename).stem + ".o")
         if not object_file.exists() or not stamp.exists() or stamp.read_text() != identity:
-            subprocess.run([*command, "-c", str(output / filename), "-o", str(object_file)], check=True)
+            subprocess.run([*generated_command, "-c", str(output / filename), "-o", str(object_file)], check=True)
             stamp.write_text(identity)
         objects.append(str(object_file))
     executable = output / ("runtime-android" if android else "runtime.exe")

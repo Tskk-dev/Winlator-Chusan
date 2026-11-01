@@ -61,10 +61,13 @@ silently inherit a blanket success response.
    Windows and ARM64 and iteratively records the first missing operation.
    Latest: four C and 425 C++ callbacks complete on both platforms.
    [Constructor evidence](verification/constructor-runtime-2026-11-01.md).
+   A later host continuation reaches 674 C++ callbacks and a dynamic
+   `CreateHardLinkW` lookup; its new tablet comparison is pending.
+   [Continuation evidence](verification/constructor-continuation-2026-11-01.md).
    Four inspected C initializer table members are admitted as roots. Native
    callback iteration, cdecl stack handling and selected CRT adapters are
    implemented; full startup remains unproved.
-   Current shared host/ARM64 stop: `CreateEventW` after 271 executed blocks.
+   Earlier shared host/ARM64 stop: `CreateEventW` after 271 executed blocks.
    [Checkpoint](verification/startup-bringup-2026-10-31.md).
 4. **Early graphics decision.** Qualify the kit's actual D3D9 and shader code
    on Android before large-scale startup work. First prove shader draw,
@@ -79,6 +82,10 @@ silently inherit a blanket success response.
    conversion and a populated HostD9Draw packet are a separate follow-up gate.
    Generic offscreen draw/readback now passes with stock and app-private Turnip
    on the target tablet. [Evidence](verification/vulkan-draw-2026-11-01.md).
+   A kit-translated D3D9 pixel shader now compiles through glslang and passes
+   16/16 pixel readback on both drivers. Guest COM, game draw packets and
+   presentation remain pending.
+   [Shader evidence](verification/d3d9-shader-2026-11-01.md).
 5. **DLL/CRT and content.** Close the actual MSVC/UCRT/SEH, Cg, E-mote and CRI
    dependencies. Prove an original content frame and decoded audio with a
    measured playback clock. A clear or silent output is a separate milestone.
