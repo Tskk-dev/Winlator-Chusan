@@ -1,4 +1,5 @@
 #include "vulkan_driver.h"
+#include "gpu_probe.h"
 #include <jni.h>
 #include <vulkan/vulkan.h>
 #include <algorithm>
@@ -101,6 +102,17 @@ Java_dev_chusan_runtimeprobe_NativeProbeActivity_probe(JNIEnv* env, jclass, jstr
             auto destroyDevice = entry<PFN_vkDestroyDevice>(gipa, instance, "vkDestroyDevice");
             VkDevice device = VK_NULL_HANDLE;
             require(entry<PFN_vkCreateDevice>(gipa, instance, "vkCreateDevice")(gpu, &deviceInfo, nullptr, &device), "vkCreateDevice");
+            auto getQueue = entry<PFN_vkGetDeviceQueue>(gipa, instance, "vkGetDeviceQueue");
+            VkQueue queue = VK_NULL_HANDLE;
+            getQueue(device, family, 0, &queue);
+            chusan::GpuProbeResult draw{};
+            std::string draw_error;
+            try {
+                draw = chusan::run_gpu_probe(gipa, instance, gpu, device, family, queue);
+            } catch (const std::exception& error) {
+                draw_error = error.what();
+            }
+            if (!draw.error.empty()) draw_error = draw.error;
             destroyDevice(device, nullptr);
             uint32_t version = properties.properties.apiVersion;
             std::ostringstream out;
@@ -113,7 +125,15 @@ Java_dev_chusan_runtimeprobe_NativeProbeActivity_probe(JNIEnv* env, jclass, jstr
                 << ",\"driver_name\":" << quote(driverProperties.driverName)
                 << ",\"driver_info\":" << quote(driverProperties.driverInfo)
                 << ",\"texture_compression_bc\":" << (features.textureCompressionBC ? "true" : "false")
-                << ",\"logical_device_created\":true,\"draw_verified\":false,\"extensions\":[";
+                << ",\"logical_device_created\":true,\"draw_verified\":" << (draw.verified ? "true" : "false")
+                << ",\"draw_width\":4,\"draw_height\":4,\"draw_matching_pixels\":" << draw.matching_pixels
+                << ",\"draw_readback_rgba\":[" << static_cast<unsigned>(draw.rgba[0]) << ','
+                << static_cast<unsigned>(draw.rgba[1]) << ',' << static_cast<unsigned>(draw.rgba[2]) << ','
+                << static_cast<unsigned>(draw.rgba[3]) << ']'
+                << ",\"draw_readback_coherent\":" << (draw.coherent_readback ? "true" : "false")
+                << ",\"draw_elapsed_ms\":" << draw.elapsed_ms;
+            if (!draw_error.empty()) out << ",\"draw_error\":" << quote(draw_error);
+            out << ",\"extensions\":[";
             for (size_t i = 0; i < names.size(); ++i) out << (i ? "," : "") << quote(names[i]);
             out << "]}";
             report = out.str();

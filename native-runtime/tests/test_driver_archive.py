@@ -66,5 +66,22 @@ class DriverArchiveTest(unittest.TestCase):
                 driver.extract_driver(archive, out)
 
 
+class DriverDrawTest(unittest.TestCase):
+    def result(self):
+        return dict(custom_requested=False, logical_device_created=True, draw_verified=True,
+                    draw_width=4, draw_height=4, draw_matching_pixels=16,
+                    draw_readback_rgba=[255, 0, 0, 255])
+
+    def test_accepts_complete_pixel_evidence(self):
+        driver.validate_draw(self.result(), False)
+
+    def test_rejects_query_only_wrong_driver_and_incomplete_draw(self):
+        for change in (dict(draw_verified=False), dict(draw_matching_pixels=15),
+                       dict(draw_readback_rgba=[0, 0, 255, 255]), dict(custom_requested=True),
+                       dict(draw_error="timeout"), dict(logical_device_created=False)):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                driver.validate_draw(self.result() | change, False)
+
+
 if __name__ == "__main__":
     unittest.main()

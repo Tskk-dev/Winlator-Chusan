@@ -22,16 +22,31 @@ static uint32_t block_pc, block_last;
 typedef struct {uint32_t esp, cursor, end;int check_result;} InitializerFrame;
 static InitializerFrame initializers[32];
 static uint32_t initializer_depth;
+static uint32_t c_initializers_completed,cpp_initializers_completed;
 static uint32_t exit_callbacks[1024],exit_callback_count;
 #define INITIALIZER_RETURN 0x0fd00000u
+typedef struct {uint32_t references;int manual,signaled;uint16_t name[260];} EventObject;
+typedef struct {uint32_t value;EventObject *event;} EventHandle;
+static EventObject events[256];
+static EventHandle event_handles[256];
+static uint32_t handle_generation;
+static uint32_t unhandled_exception_filter;
+static uint8_t win32_tls_allocated[1088];
+typedef struct {uint32_t base,size;int aligned;} HeapBlock;
+static HeapBlock heap_blocks[8192];
+static uint32_t heap_count;
+#define HEAP_BASE 0x03000000u
+#define HEAP_END 0x0e000000u
 
 static void stop(const char *kind,uint32_t target) {
     printf("{\"stop\":\"%s\",\"target\":\"0x%08x\",\"block_pc\":\"0x%08x\","
            "\"block_last\":\"0x%08x\",\"blocks_executed\":%" PRIu64 ",\"api_calls\":%" PRIu64
-           ",\"esp\":\"0x%08x\",\"stubs\":{\"optional_cpu_features_absent\":%" PRIu64
+           ",\"esp\":\"0x%08x\",\"c_initializers_completed\":%u,\"cpp_initializers_completed\":%u,"
+           "\"stubs\":{\"optional_cpu_features_absent\":%" PRIu64
            ",\"baseline_cpuid\":%" PRIu64 ",\"empty_environment\":%" PRIu64
            ",\"optional_condition_variables_absent\":%" PRIu64 "},\"full_boot_verified\":false}\n",
-           kind,target,block_pc,block_last,executed,api_calls,cpu.r[4],feature_stub_calls,cpuid_stub_calls,environment_stub_calls,optional_export_calls);
+           kind,target,block_pc,block_last,executed,api_calls,cpu.r[4],c_initializers_completed,cpp_initializers_completed,
+           feature_stub_calls,cpuid_stub_calls,environment_stub_calls,optional_export_calls);
     exit(20);
 }
 static void permit(uint32_t base,uint32_t size,uint8_t flags) {
@@ -108,9 +123,76 @@ static void guest_name(uint32_t address,int wide,char out[128]) {
     }
     stop("module_or_export_name_length",address);
 }
+static EventHandle *event_handle(uint32_t value) {
+    EventHandle *handle=&event_handles[value&255u];
+    return value && handle->value==value?handle:NULL;
+}
+static uint32_t win32_tls_slot(X86 *c,uint32_t index) {
+    return index<64?c->fs_base+0xe10+index*4:0x0fe20000u+(index-64)*4;
+}
+static uint32_t heap_allocate(uint32_t size,uint32_t alignment,int aligned) {
+    if(!alignment || (alignment&(alignment-1)))stop("heap_alignment",alignment);
+    if(alignment<4)alignment=4;
+    if(!size)size=1;
+    uint64_t cursor=HEAP_BASE;
+    for(uint32_t index=0;index<=heap_count;index++) {
+        uint64_t base=(cursor+alignment-1)&~((uint64_t)alignment-1);
+        uint32_t limit=index<heap_count?heap_blocks[index].base:HEAP_END;
+        if(base+size<=limit && heap_count<8192) {
+            memmove(heap_blocks+index+1,heap_blocks+index,(heap_count-index)*sizeof(HeapBlock));
+            heap_blocks[index]=(HeapBlock){(uint32_t)base,size,aligned};heap_count++;
+            permit((uint32_t)base,size,3);return (uint32_t)base;
+        }
+        if(index<heap_count)cursor=(uint64_t)heap_blocks[index].base+heap_blocks[index].size;
+    }
+    wr32(0x0fe50028u,12);return 0; /* ENOMEM */
+}
+static void heap_release(uint32_t address,int aligned) {
+    if(!address)return;
+    for(uint32_t index=0;index<heap_count;index++)if(heap_blocks[index].base==address) {
+        if(heap_blocks[index].aligned!=aligned)stop("heap_free_kind",address);
+        memmove(heap_blocks+index,heap_blocks+index+1,(heap_count-index-1)*sizeof(HeapBlock));
+        heap_count--;return;
+    }
+    stop("heap_invalid_free",address);
+}
+static uint32_t create_event(X86 *c,int wide) {
+    uint32_t attributes=rd32(c->r[4]+4),name_address=rd32(c->r[4]+16);
+    if(attributes)stop("event_security_attributes",attributes);
+    uint16_t name[260]={0};
+    if(name_address) {
+        unsigned i;
+        for(i=0;i<260;i++) {
+            name[i]=wide?rd16(name_address+2*i):rd8(name_address+i);
+            if(!wide && name[i]>127)stop("event_ansi_codepage",name_address);
+            if(!name[i])break;
+        }
+        if(i==260)stop("event_name_length",name_address);
+    }
+    EventHandle *handle=NULL;
+    for(unsigned i=0;i<256;i++)if(!event_handles[i].value){handle=&event_handles[i];break;}
+    if(!handle || handle_generation==0x3fffffu)stop("event_handle_capacity",0);
+    EventObject *event=NULL;
+    if(name[0])for(unsigned i=0;i<256;i++)
+        if(events[i].references && !memcmp(events[i].name,name,sizeof(name))){event=&events[i];break;}
+    uint32_t error=183; /* existing named objects ignore the supplied reset/initial state */
+    if(!event) {
+        for(unsigned i=0;i<256;i++)if(!events[i].references){event=&events[i];break;}
+        if(!event)stop("event_object_capacity",0);
+        event->manual=rd32(c->r[4]+8)!=0;event->signaled=rd32(c->r[4]+12)!=0;
+        memcpy(event->name,name,sizeof(name));error=0;
+    }
+    event->references++;handle->event=event;
+    handle->value=0x40000000u|(++handle_generation<<8)|(uint32_t)(handle-event_handles);
+    wr32(c->fs_base+0x34,error);return handle->value;
+}
 static void initializer_next(X86 *c,int returned) {
     InitializerFrame *frame=&initializers[initializer_depth-1];
     if(c->r[4]!=frame->esp)stop("initializer_stack",c->r[4]);
+    if(returned) {
+        if(frame->check_result)c_initializers_completed++;
+        else cpp_initializers_completed++;
+    }
     if(!(returned && frame->check_result && c->r[0])) {
         while(frame->cursor<frame->end) {
             uint32_t callback=rd32(frame->cursor);frame->cursor+=4;
@@ -130,6 +212,73 @@ static void api(X86 *c,uint32_t index) {
     if(api_calls<=40) fprintf(stderr,"API %s!%s from %08x\n",import->dll,name,block_last);
     if(!strcmp(name,"GetCurrentThreadId")) {api_return(c,0,1);return;}
     if(!strcmp(name,"GetCurrentProcessId")) {api_return(c,0,1);return;}
+    if(!strcmp(name,"GetLastError")) {api_return(c,0,rd32(c->fs_base+0x34));return;}
+    if(!strcmp(name,"SetLastError")) {wr32(c->fs_base+0x34,rd32(c->r[4]+4));api_return(c,1,0);return;}
+    if(!strcmp(name,"SetUnhandledExceptionFilter")) {
+        uint32_t previous=unhandled_exception_filter;
+        a0=rd32(c->r[4]+4);if(a0)check(a0,1,0);
+        /* Guest exception delivery still stops explicitly in recomp_int. */
+        unhandled_exception_filter=a0;api_return(c,1,previous);return;
+    }
+    if(!strcmp(name,"TlsAlloc")) {
+        for(uint32_t index=0;index<1088;index++)if(!win32_tls_allocated[index]) {
+            win32_tls_allocated[index]=1;wr32(win32_tls_slot(c,index),0);api_return(c,0,index);return;
+        }
+        wr32(c->fs_base+0x34,8);api_return(c,0,0xffffffffu);return;
+    }
+    if(!strcmp(name,"TlsGetValue") || !strcmp(name,"TlsSetValue") || !strcmp(name,"TlsFree")) {
+        uint32_t index=rd32(c->r[4]+4),result=0,args=!strcmp(name,"TlsSetValue")?2:1;
+        if(index>=1088 || !win32_tls_allocated[index])wr32(c->fs_base+0x34,87);
+        else if(!strcmp(name,"TlsGetValue")){result=rd32(win32_tls_slot(c,index));wr32(c->fs_base+0x34,0);}
+        else {
+            if(!strcmp(name,"TlsFree")){win32_tls_allocated[index]=0;wr32(win32_tls_slot(c,index),0);}
+            else wr32(win32_tls_slot(c,index),rd32(c->r[4]+8));
+            result=1;
+        }
+        api_return(c,args,result);return;
+    }
+    if(!strcmp(name,"memset")) {
+        uint32_t destination=rd32(c->r[4]+4),value=rd32(c->r[4]+8),size=rd32(c->r[4]+12);
+        check(destination,size,1);if(size)memset(g_mem+destination,(uint8_t)value,size);
+        api_return(c,0,destination);return;
+    }
+    if(!strcmp(name,"memcpy") || !strcmp(name,"memmove")) {
+        uint32_t destination=rd32(c->r[4]+4),source=rd32(c->r[4]+8),size=rd32(c->r[4]+12);
+        check(destination,size,1);check(source,size,0);
+        if(size)memmove(g_mem+destination,g_mem+source,size);
+        api_return(c,0,destination);return;
+    }
+    if(!strcmp(name,"_aligned_malloc") || !strcmp(name,"malloc")) {
+        int aligned=!strcmp(name,"_aligned_malloc");
+        uint32_t size=rd32(c->r[4]+4),alignment=aligned?rd32(c->r[4]+8):8;
+        api_return(c,0,heap_allocate(size,alignment,aligned));return;
+    }
+    if(!strcmp(name,"_aligned_free") || !strcmp(name,"free")) {
+        heap_release(rd32(c->r[4]+4),!strcmp(name,"_aligned_free"));api_return(c,0,0);return;
+    }
+    if(!strcmp(name,"_errno")) {api_return(c,0,0x0fe50028u);return;}
+    if(!strcmp(name,"CreateEventW") || !strcmp(name,"CreateEventA")) {
+        api_return(c,4,create_event(c,!strcmp(name,"CreateEventW")));return;
+    }
+    if(!strcmp(name,"SetEvent") || !strcmp(name,"ResetEvent") || !strcmp(name,"CloseHandle")) {
+        EventHandle *handle=event_handle(rd32(c->r[4]+4));
+        if(!handle){wr32(c->fs_base+0x34,6);api_return(c,1,0);return;}
+        if(!strcmp(name,"CloseHandle")){handle->event->references--;handle->value=0;handle->event=NULL;}
+        else handle->event->signaled=!strcmp(name,"SetEvent");
+        api_return(c,1,1);return;
+    }
+    if(!strcmp(name,"WaitForSingleObject")) {
+        uint32_t value=rd32(c->r[4]+4),milliseconds=rd32(c->r[4]+8);
+        EventHandle *handle=event_handle(value);
+        if(!handle){wr32(c->fs_base+0x34,6);api_return(c,2,0xffffffffu);return;}
+        if(handle->event->signaled) {
+            if(!handle->event->manual)handle->event->signaled=0;
+            api_return(c,2,0);return;
+        }
+        /* shortcut: blocking waits need guest scheduling; never manufacture a wake-up. */
+        if(milliseconds){fprintf(stderr,"Pending event wait, timeout %u ms\n",milliseconds);stop("pending_event_wait",value);}
+        api_return(c,2,258);return;
+    }
     if(!strcmp(name,"GetModuleHandleW")) {
         a0=rd32(c->r[4]+4);
         if(!a0){api_return(c,1,RUNTIME_IMAGE_BASE);return;}
@@ -153,12 +302,37 @@ static void api(X86 *c,uint32_t index) {
         a0=rd32(c->r[4]+4);if(a0%8)stop("slist_alignment",a0);
         wr64(a0,0);api_return(c,1,0);return;
     }
-    if(!strcmp(name,"__vcrt_InitializeCriticalSectionEx")) {
-        a0=rd32(c->r[4]+4);uint32_t spin=rd32(c->r[4]+8),flags=rd32(c->r[4]+12);
+    if(!strcmp(name,"EnterCriticalSection") || !strcmp(name,"TryEnterCriticalSection")
+       || !strcmp(name,"LeaveCriticalSection") || !strcmp(name,"DeleteCriticalSection")) {
+        a0=rd32(c->r[4]+4);check(a0,24,1);check(a0,24,0);
+        uint32_t recursion=rd32(a0+8),owner=rd32(a0+12);
+        /* Only the primary guest thread exists; another owner needs scheduling. */
+        if(owner && owner!=1)stop("critical_section_other_owner",a0);
+        if((!owner && recursion) || (owner && !recursion) || rd32(a0+4)!=recursion-1)
+            stop("critical_section_state",a0);
+        if(!strcmp(name,"DeleteCriticalSection")) {
+            if(recursion)stop("critical_section_delete_locked",a0);
+            memset(g_mem+a0,0,24);api_return(c,1,0);return;
+        }
+        if(!strcmp(name,"LeaveCriticalSection")) {
+            if(!recursion)stop("critical_section_not_owned",a0);
+            recursion--;
+        } else {
+            if(recursion==0x7fffffffu)stop("critical_section_recursion",a0);
+            recursion++;
+        }
+        wr32(a0+4,recursion-1);wr32(a0+8,recursion);wr32(a0+12,recursion?1:0);
+        api_return(c,1,!strcmp(name,"TryEnterCriticalSection")?1:0);return;
+    }
+    if(!strcmp(name,"__vcrt_InitializeCriticalSectionEx") || !strcmp(name,"InitializeCriticalSection")
+       || !strcmp(name,"InitializeCriticalSectionEx")) {
+        int wrapper=!strcmp(name,"__vcrt_InitializeCriticalSectionEx");
+        int extended=wrapper || !strcmp(name,"InitializeCriticalSectionEx");
+        a0=rd32(c->r[4]+4);uint32_t spin=extended?rd32(c->r[4]+8):0,flags=extended?rd32(c->r[4]+12):0;
         if(flags)stop("critical_section_flags",flags);
         check(a0,24,1);memset(g_mem+a0,0,24);
         wr32(a0+4,0xffffffffu);wr32(a0+20,spin);
-        api_return(c,0,1);return; /* vcruntime wrapper is cdecl, unlike the Win32 API */
+        api_return(c,wrapper?0:(extended?3:1),extended?1:0);return; /* vcruntime wrapper is cdecl */
     }
     if(!strcmp(name,"IsProcessorFeaturePresent")) {
         /* Optional feature queries select the baseline CRT path. */
@@ -246,6 +420,7 @@ int main(int argc,char **argv) {
     memset(&cpu,0,sizeof(cpu));cpu.fs_base=0x0fe00000u;
     wr32(cpu.fs_base,0xffffffffu);wr32(cpu.fs_base+4,0x0f000000u);wr32(cpu.fs_base+8,0x0ef00000u);
     wr32(cpu.fs_base+0x18,cpu.fs_base);wr32(cpu.fs_base+0x2c,0x0fe30000u);wr32(cpu.fs_base+0x30,0x0fe10000u);
+    wr32(cpu.fs_base+0xf94,0x0fe20000u); /* Win32 expansion slots are separate from module static TLS. */
     if(image_tls.start) {
         if(image_tls.end<image_tls.start || (uint64_t)image_tls.end-image_tls.start+image_tls.zero_fill>0x10000)
             stop("tls_size",image_tls.start);

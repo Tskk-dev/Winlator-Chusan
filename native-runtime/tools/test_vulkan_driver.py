@@ -16,6 +16,17 @@ from test_device import select_device
 PACKAGE = "dev.chusan.runtimeprobe"
 
 
+def validate_draw(result, custom):
+    if (result.get("error") or result.get("draw_error")
+            or result.get("custom_requested") is not custom
+            or result.get("logical_device_created") is not True
+            or result.get("draw_verified") is not True
+            or (result.get("draw_width"), result.get("draw_height")) != (4, 4)
+            or result.get("draw_matching_pixels") != 16
+            or result.get("draw_readback_rgba") != [255, 0, 0, 255]):
+        raise ValueError(f"Driver draw/readback probe failed: {result}")
+
+
 def extract_driver(archive, destination):
     """Accept driver packages, not flashable system modifications or unsafe archives."""
     total = 0
@@ -91,8 +102,7 @@ def main():
                 result = json.loads(text)
                 if expected_error and expected_error in result.get("error", ""):
                     return result
-                if result.get("error") or result.get("logical_device_created") is not True:
-                    raise ValueError(f"{mode} driver probe failed: {result}")
+                validate_draw(result, mode == "custom")
                 return result
             time.sleep(0.25)
         raise TimeoutError(f"{mode} driver probe did not publish a result")
@@ -132,7 +142,7 @@ def main():
                   "driver_archive_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
                   "apk_sha256": hashlib.sha256(args.apk.read_bytes()).hexdigest(),
                   "invalid_driver_path_rejected": True,
-                  "draw_verified": False, "dxvk_compatibility_verified": False}
+                  "draw_verified": True, "d3d9_verified": False, "dxvk_compatibility_verified": False}
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"system_driver": system["driver_name"], "system_api": system["api_version"],
@@ -141,7 +151,7 @@ def main():
                           "custom_extension_count": len(custom["extensions"]),
                           "added_extension_count": len(report["added_extensions"]),
                           "invalid_driver_path_rejected": True,
-                          "logical_devices_created": True}, indent=2))
+                          "logical_devices_created": True, "draw_verified": True}, indent=2))
 
 
 if __name__ == "__main__":

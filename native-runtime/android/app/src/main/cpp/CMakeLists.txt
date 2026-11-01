@@ -11,7 +11,7 @@ FetchContent_Declare(adrenotools
     GIT_SUBMODULES_RECURSE TRUE)
 FetchContent_MakeAvailable(adrenotools)
 
-add_library(chusan_driver_probe SHARED vulkan_probe.cpp ../../../../../platform/android/vulkan_driver.cpp)
-target_include_directories(chusan_driver_probe PRIVATE ../../../../../platform/android)
+add_library(chusan_driver_probe SHARED vulkan_probe.cpp ../../../../../platform/android/vulkan_driver.cpp ../../../../../platform/android/gpu_probe.cpp)
+target_include_directories(chusan_driver_probe PRIVATE . ../../../../../platform/android)
 target_compile_options(chusan_driver_probe PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(chusan_driver_probe PRIVATE adrenotools dl log)

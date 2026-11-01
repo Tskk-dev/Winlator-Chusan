@@ -2,7 +2,9 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import uuid
@@ -37,16 +39,28 @@ def build(compiler, target, kit, output, android=False):
              "-I", str(ROOT / "runtime"), "-I", str(output), "-I", str(kit / "runtime")]
     prefix = "android" if android else "windows"
     command = [str(compiler), *target, *flags]
-    stamp = output / (prefix + "-blocks.sha256")
-    identity = hashlib.sha256((sha(output / "blocks.c") + sha(ROOT / "runtime/runtime.h")
-                               + sha(output / "x86.h") + str(command)).encode()).hexdigest()
-    object_file = output / (prefix + "-blocks.o")
-    if not object_file.exists() or not stamp.exists() or stamp.read_text() != identity:
-        subprocess.run([*command, "-c", str(output / "blocks.c"), "-o", str(object_file)], check=True)
-        stamp.write_text(identity)
+    preparation=json.loads((output/"preparation.json").read_text())
+    units=preparation.get("translation_units",{"blocks.c":sha(output/"blocks.c")})
+    objects=[]
+    for filename,expected in sorted(units.items()):
+        if not re.fullmatch(r"blocks(?:_[0-9a-f]{4})?\.c",filename) or sha(output/filename)!=expected:
+            raise ValueError("Invalid or changed prepared translation unit")
+        stamp = output / (prefix + "-" + Path(filename).stem + ".sha256")
+        identity = hashlib.sha256((expected + sha(ROOT / "runtime/runtime.h")
+                                   + sha(output / "x86.h") + str(command)).encode()).hexdigest()
+        object_file = output / (prefix + "-" + Path(filename).stem + ".o")
+        if not object_file.exists() or not stamp.exists() or stamp.read_text() != identity:
+            subprocess.run([*command, "-c", str(output / filename), "-o", str(object_file)], check=True)
+            stamp.write_text(identity)
+        objects.append(str(object_file))
     executable = output / ("runtime-android" if android else "runtime.exe")
-    subprocess.run([*command, str(output / "runtime-source.c"), str(object_file), "-lm",
-                    *(["-Wl,-z,max-page-size=16384"] if android else []), "-o", str(executable)], check=True)
+    arguments=[*target,*flags,str(output/"runtime-source.c"),*objects,"-lm",
+               *(["-Wl,-z,max-page-size=16384"] if android else []),"-o",str(executable)]
+    response=output/(prefix+"-link.rsp")
+    # Both clang and the llvm-mingw wrapper read this file; forward slashes survive either parser.
+    response.write_text("\n".join(json.dumps(argument.replace("\\","/") if os.name=="nt" else argument,
+                                           ensure_ascii=False) for argument in arguments),encoding="utf-8")
+    subprocess.run([str(compiler),"--rsp-quoting=posix","@"+str(response)],check=True)
     return executable
 
 
@@ -55,10 +69,15 @@ def main():
     parser.add_argument("--prepare-dir", type=Path, required=True)
     parser.add_argument("--kit", type=Path, required=True)
     parser.add_argument("--clang", type=Path, required=True)
-    parser.add_argument("--android-clang", type=Path, required=True)
+    parser.add_argument("--android-clang", type=Path)
+    parser.add_argument("--host-only", action="store_true")
     parser.add_argument("--adb")
     parser.add_argument("--serial")
     args = parser.parse_args()
+    if args.host_only and args.adb:
+        parser.error("--host-only cannot be combined with --adb")
+    if not args.host_only and not args.android_clang:
+        parser.error("Provide --android-clang or use --host-only")
     remote = serial = None
 
     def adb(*parts, check=True):
@@ -78,9 +97,11 @@ def main():
                   "prepared_blocks": preparation["blocks"], "prepared_instructions": preparation["instructions"],
                   "windows": run_stop([str(windows), str(output / "image.bin")], output / "windows-stderr.log"),
                   "image_sha256": preparation["image_sha256"], "full_boot_verified": False}
-        android = build(args.android_clang.resolve(), [], kit, output, android=True)
-        report["android_executable_sha256"] = sha(android)
+        if not args.host_only:
+            android = build(args.android_clang.resolve(), [], kit, output, android=True)
+            report["android_executable_sha256"] = sha(android)
         report["blocks_c_sha256"] = sha(output / "blocks.c")
+        report["translation_units"]=preparation.get("translation_units",{})
         report["runtime_source_sha256"] = sha(output / "runtime-source.c")
         if args.adb:
             serial = select_device(adb("devices").stdout, args.serial)
@@ -98,7 +119,7 @@ def main():
                                 for key, prop in {"model": "ro.product.model", "soc": "ro.soc.model",
                                                   "sdk": "ro.build.version.sdk"}.items()}
         (output / "run-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(report, indent=2))
+        print(json.dumps({key:value for key,value in report.items() if key!="translation_units"}, indent=2))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print(f"Runtime bring-up failed: {error}", file=sys.stderr)
         return 1

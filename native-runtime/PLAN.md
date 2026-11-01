@@ -75,6 +75,8 @@ silently inherit a blanket success response.
    Connect the tested driver's GIPA to the renderer/Volk custom loader; do not
    let a custom-driver test fall back to system Vulkan. D3D9 GLSL/glslang
    conversion and a populated HostD9Draw packet are a separate follow-up gate.
+   Generic offscreen draw/readback now passes with stock and app-private Turnip
+   on the target tablet. [Evidence](verification/vulkan-draw-2026-11-01.md).
 5. **DLL/CRT and content.** Close the actual MSVC/UCRT/SEH, Cg, E-mote and CRI
    dependencies. Prove an original content frame and decoded audio with a
    measured playback clock. A clear or silent output is a separate milestone.

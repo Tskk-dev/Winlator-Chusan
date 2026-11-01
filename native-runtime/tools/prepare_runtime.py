@@ -1,6 +1,6 @@
 """Prepare bounded AOT startup from the pinned PE; keep all private output in .work."""
 import argparse
-from collections import deque
+from collections import defaultdict, deque
 import hashlib
 import importlib
 import json
@@ -34,7 +34,7 @@ def checked_header(source):
     return source
 
 
-def decode_graph(image, roots, limit):
+def decode_graph(image, roots, limit, thunks=frozenset()):
     """Follow actual direct flow, splitting at every transfer; indirect flow stays pending."""
     queue = deque(roots)
     decoded = {}
@@ -60,6 +60,9 @@ def decode_graph(image, roots, limit):
                     raise ValueError(f"Overlapping instruction decode: {pc:08x}")
                 instruction_bytes[byte] = pc
             block.append(insn)
+            if insn.mnemonic in ("push","mov"):
+                queue.extend(operand.imm for operand in insn.operands
+                             if operand.type==X86_OP_IMM and operand.imm in thunks)
             pc += insn.size
             jump = insn.group(capstone.CS_GRP_JUMP)
             call = insn.group(capstone.CS_GRP_CALL)
@@ -78,7 +81,30 @@ def decode_graph(image, roots, limit):
     return decoded, sorted(frontier)
 
 
-def generate(executable, kit, output, roots, limit, profile=None):
+def table_roots(image, start, end):
+    if start%4 or end%4 or end<start or end-start>0x100000 or start<image.base or end>image.end:
+        raise ValueError("Invalid initializer-table bounds")
+    raw=image.data[start-image.base:end-image.base]
+    roots=[int.from_bytes(raw[i:i+4],"little") for i in range(0,len(raw),4)]
+    roots=[value for value in roots if value]
+    if any(not image.is_exec(value) for value in roots):
+        raise ValueError("Initializer table contains a non-executable pointer")
+    return roots,{"start":hex(start),"end":hex(end),"callbacks":len(roots),"sha256":hashlib.sha256(raw).hexdigest()}
+
+
+def ilt_entries(image,start,end):
+    if start<image.base or end>image.end or end<=start or (end-start)%5 or end-start>0x100000:
+        raise ValueError("Invalid incremental-link table bounds")
+    for address in range(start,end,5):
+        offset=address-image.base
+        target=address+5+int.from_bytes(image.data[offset+1:offset+5],"little",signed=True)
+        if image.data[offset]!=0xe9 or not image.is_exec(address) or not image.is_exec(target):
+            raise ValueError("Incremental-link table is not a sequence of executable relative jumps")
+    return set(range(start,end,5)),{"start":hex(start),"end":hex(end),"entries":(end-start)//5,
+                                   "sha256":hashlib.sha256(image.data[start-image.base:end-image.base]).hexdigest()}
+
+
+def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt=None):
     profile = profile or json.loads((ROOT / "profiles/startup-initializer.json").read_text())
     source_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
     if source_hash != profile["source_sha256"]:
@@ -120,7 +146,13 @@ def generate(executable, kit, output, roots, limit, profile=None):
             tls = {"start": value.StartAddressOfRawData, "end": value.EndAddressOfRawData,
                    "index": value.AddressOfIndex, "callbacks": value.AddressOfCallBacks,
                    "zero_fill": value.SizeOfZeroFill}
-    blocks, frontier = decode_graph(image, [entry, *roots], limit)
+    table_metadata=[]
+    for start,end in tables:
+        callbacks,description=table_roots(image,start,end)
+        roots=[*roots,*callbacks];table_metadata.append(description)
+    roots=list(dict.fromkeys(roots))
+    thunks,ilt_metadata=ilt_entries(image,*ilt) if ilt else (frozenset(),None)
+    blocks, frontier = decode_graph(image, [entry, *roots], limit,thunks)
     class RuntimeTranslator(module.Translator):
         def _emit(self, fn, index, insn, mnemonic, following, live):
             if mnemonic in ("MOVLPD", "MOVLPS", "MOVHPD", "MOVHPS"):
@@ -144,9 +176,10 @@ def generate(executable, kit, output, roots, limit, profile=None):
             return [f"recomp_jump(c, {module.read_op(operand, 32)}); return;"]
 
     emitter = RuntimeTranslator(image, set(blocks), SimpleNamespace(eager_flags=True, allow_unmodelled=None))
-    bodies = ['#include "runtime.h"']
+    bodies = defaultdict(lambda:['#include "runtime.h"'])
     metadata = []
     for address, instructions in sorted(blocks.items()):
+        body=bodies[f"blocks_{address>>16:04x}.c"]
         end = instructions[-1].address + instructions[-1].size
         try:
             function = module.Function(address, f"block_{address:08x}", end-address,
@@ -167,17 +200,23 @@ def generate(executable, kit, output, roots, limit, profile=None):
                 raise ValueError("Unchecked memory helper needs qualification")
             if any("recomp_unmodelled(" in line for line in lines):
                 metadata.append({"va": address, "translation_error": "Emitter inserted an unsupported-instruction guard"})
-            bodies.extend(lines)
+            body.extend(lines)
         except (module.TranslateError, ValueError) as error:
-            bodies.append(f"void fn_{address:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{address:08x}u); }}")
+            body.append(f"void fn_{address:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{address:08x}u); }}")
             metadata.append({"va": address, "translation_error": str(error)})
-    bodies.append("const RuntimeBlock runtime_blocks[] = {")
+    table=['#include "runtime.h"']
+    table.extend(f"extern void fn_{address:08x}(X86 *c);" for address in sorted(blocks))
+    table.append("const RuntimeBlock runtime_blocks[] = {")
     for address, instructions in sorted(blocks.items()):
-        bodies.append(f"{{0x{address:08x}u,0x{instructions[-1].address:08x}u,fn_{address:08x}}},")
-    bodies.extend(["};", f"const uint32_t runtime_block_count = {len(blocks)}u;"])
+        table.append(f"{{0x{address:08x}u,0x{instructions[-1].address:08x}u,fn_{address:08x}}},")
+    table.extend(["};", f"const uint32_t runtime_block_count = {len(blocks)}u;"])
+    bodies["blocks.c"]=table
     output.mkdir(parents=True, exist_ok=True)
     (output / "x86.h").write_text(checked_header((kit / "runtime/x86.h").read_text()), encoding="utf-8")
-    (output / "blocks.c").write_text("\n".join(bodies) + "\n", encoding="utf-8")
+    units={}
+    for filename,lines in sorted(bodies.items()):
+        data=("\n".join(lines)+"\n").encode("utf-8")
+        (output/filename).write_bytes(data);units[filename]=hashlib.sha256(data).hexdigest()
     header = [f"#define RUNTIME_IMAGE_BASE {image.base}u", f"#define RUNTIME_IMAGE_SIZE {image.size}u",
               f"#define RUNTIME_ENTRY {entry}u", "static const RuntimeRegion image_regions[] = {"]
     header.extend("{%du,%du,%du}," % (r["base"], r["size"], r["flags"]) for r in regions)
@@ -192,6 +231,9 @@ def generate(executable, kit, output, roots, limit, profile=None):
               "frontier": [hex(x) for x in frontier], "translation_errors": metadata,
               "extra_roots": [hex(x) for x in roots], "eager_flags": True, "seh": "guest_chain_only",
               "image_sha256": hashlib.sha256(image.data).hexdigest(), "full_boot_verified": False}
+    report["initializer_tables"]=table_metadata
+    report["incremental_link_table"]=ilt_metadata
+    report["translation_units"]=units
     report["indirect_sites"] = [hex(insn.address) for instructions in blocks.values() for insn in instructions
                                 if (insn.group(capstone.CS_GRP_CALL) or insn.group(capstone.CS_GRP_JUMP))
                                 and insn.operands and insn.operands[0].type != X86_OP_IMM]
@@ -206,12 +248,19 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-blocks", type=int, default=2048)
     parser.add_argument("--root", action="append", default=[], type=lambda v: int(v, 0))
+    parser.add_argument("--init-table", action="append", default=[], type=lambda v: tuple(int(p,0) for p in v.split(":")))
+    parser.add_argument("--ilt-range", type=lambda v: tuple(int(p,0) for p in v.split(":")))
     args = parser.parse_args()
     try:
         if not args.output.resolve().is_relative_to(ROOT / ".work") or not 1 <= args.max_blocks <= 100000:
             raise ValueError("Output must be under .work and block limit between 1 and 100000")
-        report = generate(args.exe.resolve(), args.kit.resolve(), args.output.resolve(), args.root, args.max_blocks)
-        print(json.dumps({key: value for key, value in report.items() if key not in ("frontier", "translation_errors", "indirect_sites")}, indent=2))
+        if any(len(table)!=2 for table in args.init_table):
+            raise ValueError("Initializer tables use START:END bounds")
+        if args.ilt_range and len(args.ilt_range)!=2:
+            raise ValueError("Incremental-link table uses START:END bounds")
+        report = generate(args.exe.resolve(), args.kit.resolve(), args.output.resolve(), args.root, args.max_blocks,
+                          tables=args.init_table,ilt=args.ilt_range)
+        print(json.dumps({key: value for key, value in report.items() if key not in ("frontier", "translation_errors", "indirect_sites", "extra_roots", "translation_units")}, indent=2))
         print(f"Pending direct targets: {len(report['frontier'])}; guarded translation errors: {len(report['translation_errors'])}")
     except (ValueError, OSError, subprocess.SubprocessError, pefile.PEFormatError) as error:
         print(f"Preparation failed: {error}", file=sys.stderr)

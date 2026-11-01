@@ -4,7 +4,7 @@ This is the start of a separate native CHUNITHM project in Winlator-Chusan.
 The Windows-container overlay work is deferred. Nothing in this directory
 currently boots CHUNITHM or replaces Wine in the existing Android app.
 
-## Verified on 31 October 2026
+## Verified on 31 October–1 November 2026
 
 - Read-only inspection recorded 25 top-level PE executables and DLLs from the
   local installation. The main executable is x86; amdaemon is x86-64.
@@ -46,10 +46,16 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   behavior for credits, cards, backup and IO. It is useful reference material;
   its managed interfaces do not implement the native CHUNITHM IPC/ABI.
   [Service replacement assessment](verification/service-reference-2026-10-31.md).
-- The bounded runtime now executes the actual entry/CRT path and first two C
+- The first bounded runtime checkpoint executed the actual entry/CRT path and first two C
   initializer callbacks. Windows x64 and physical ARM64 both reach
   `CreateEventW` after 271 blocks and 21 native API calls. This is a partial
   startup checkpoint; [scope and identities](verification/startup-bringup-2026-10-31.md).
+- The expanded runtime completes all four C initializers and 239 C++ callbacks
+  on both Windows and the physical tablet. Both execute 12,980 block visits
+  and 517 import dispatches, stopping at `_mktime64`. [Startup evidence](verification/startup-bringup-2026-11-01.md).
+  All 33 tooling tests and 29 synthetic scenarios pass. The selected-driver
+  GPU test also passes all 16 pixels with stock and Turnip.
+  [Graphics evidence](verification/vulkan-draw-2026-11-01.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.
@@ -157,8 +163,11 @@ loader in `platform/android/`. It pins libadrenotools to
 `8483dfdaa2abf97ee89ad0e5f337e7b508550c6b`, including its pinned linkernsbypass
 submodule. It loads the system driver or an app-private custom driver before
 creating a Vulkan instance, uses that handle's entry points, reports the actual
-driver identity/extensions, and attempts a graphics-queue logical device.
-It does not render a frame or establish DXVK compatibility.
+driver identity/extensions, creates a graphics-queue logical device, draws a
+4x4 triangle and verifies every pixel through a staging-buffer readback.
+Both stock and custom drivers passed on the target tablet.
+[Draw verification](verification/vulkan-draw-2026-11-01.md).
+D3D9 and DXVK compatibility remain unverified.
 
 Hook libraries are extracted using legacy JNI packaging. The hook path comes
 from `ApplicationInfo.nativeLibraryDir`; custom drivers must be under the
@@ -214,12 +223,14 @@ not an Android application or an original full-startup run.
 adapters. `prepare_runtime.py` follows direct control flow from the pinned PE
 entry, emits compiled C, maps the original sections and IAT, and records pending
 targets/translation guards. Additional roots must come from inspected code or
-data-driven callbacks. The four roots below are the actual non-null C initializer
-table members for this hash:
+data-driven callbacks. The two initializer tables below contain four C and 959
+C++ callbacks. The ILT range is a validated sequence of 92,112 relative jumps;
+only thunk pointers actually used as immediates in admitted code seed further
+discovery. The extra guard thunk was observed during execution:
 
 ```powershell
-python native-runtime/tools/prepare_runtime.py --exe '<private game bin>/chusanApp.exe' --kit '<pinned recomp-kit checkout>' --output native-runtime/.work/startup-bringup --max-blocks 4096 --root 0xe3bd95 --root 0xe3be62 --root 0xe3b418 --root 0x13179d0
-python native-runtime/tools/run_runtime.py --prepare-dir native-runtime/.work/startup-bringup --kit '<pinned recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
+python native-runtime/tools/prepare_runtime.py --exe '<private game bin>/chusanApp.exe' --kit '<pinned recomp-kit checkout>' --output native-runtime/.work/startup-expanded --max-blocks 28000 --init-table 0x172d8d8:0x172ddec --init-table 0x172c000:0x172d7d4 --ilt-range 0x401005:0x471715 --root 0x41dd86
+python native-runtime/tools/run_runtime.py --prepare-dir native-runtime/.work/startup-expanded --kit '<pinned recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
 ```
 
 The runner compiles Windows x64 and Android ARM64 versions, executes the original
@@ -227,6 +238,9 @@ entry's translated code, and records the first explicit stop. Exit zero from
 the Python runner means it captured that stop; inspect `run-report.json` for the
 actual missing operation. It does not mean the game booted. Private image/code
 and diagnostics stay in `.work/`; temporary device files are removed.
+Generated C is split into cached translation units, with a response file for
+linking larger builds on Windows. Use `--host-only` without the Android arguments
+when the tablet is unavailable.
 
 The consumer uses the pinned instruction header with bounds/permission checks
 inserted into all 15 memory accessors in a private generated copy, including
@@ -240,6 +254,12 @@ callbacks, including the error-return short circuit and cdecl stack ownership.
 Initial adapters provide clocks, CRT configuration, an empty process-environment
 stub, baseline CPU-feature stubs and exit-callback registration. They do not yet
 provide process shutdown, full locale/floating-point semantics or full CRT APIs.
+Events support named sharing, reset modes and handle lifetime. Blocking event
+waits still stop until guest scheduling exists. Critical sections support
+recursion on the primary guest thread. Win32 TLS has separate inline/expansion
+slots; it does not overwrite module static TLS. The initial guest heap supports
+aligned/ordinary allocation and freeing within a 176 MiB arena, with 8,192 live
+allocation records. General multithreading and the remaining CRT calls are pending.
 
 Synthetic programs test loops/calls/returns, callback iteration/short circuit,
 instruction budget, memory protection, 53-bit control state and SIMD data moves.
