@@ -257,6 +257,52 @@ static void api(X86 *c,uint32_t index) {
         heap_release(rd32(c->r[4]+4),!strcmp(name,"_aligned_free"));api_return(c,0,0);return;
     }
     if(!strcmp(name,"_errno")) {api_return(c,0,0x0fe50028u);return;}
+    if(!strcmp(name,"_mktime64")) {
+        _Static_assert(sizeof(time_t)>=8,"Calendar conversion requires 64-bit time_t");
+        a0=rd32(c->r[4]+4);check(a0,36,0);check(a0,36,1);
+        struct tm value={0};
+        int *fields[]={&value.tm_sec,&value.tm_min,&value.tm_hour,&value.tm_mday,&value.tm_mon,
+                       &value.tm_year,&value.tm_wday,&value.tm_yday,&value.tm_isdst};
+        for(unsigned i=0;i<9;i++)*fields[i]=(int32_t)rd32(a0+4*i);
+        time_t converted=mktime(&value);
+        uint64_t result=UINT64_MAX;
+        if(converted<0 || (uint64_t)converted>32535215999ull)wr32(0x0fe50028u,22);
+        else {
+            result=(uint64_t)converted;
+            for(unsigned i=0;i<9;i++)wr32(a0+4*i,(uint32_t)*fields[i]);
+        }
+        c->r[2]=(uint32_t)(result>>32);api_return(c,0,(uint32_t)result);return;
+    }
+    if(!strcmp(name,"wcsncpy_s")) {
+        uint32_t destination=rd32(c->r[4]+4),capacity=rd32(c->r[4]+8);
+        uint32_t source=rd32(c->r[4]+12),count=rd32(c->r[4]+16);
+        if(!destination || !capacity || (!source && count))stop("wstring_invalid_parameter",destination);
+        if(capacity>GUEST_SIZE/2)stop("wstring_capacity",capacity);
+        check(destination,capacity*2,1);
+        uint32_t limit=count==0xffffffffu?capacity-1:count,index=0;
+        while(index<limit && index<capacity) {
+            uint16_t character=rd16(source+2*index);
+            if(!character)break;
+            wr16(destination+2*index,character);index++;
+        }
+        if(index==capacity) {
+            wr16(destination,0);wr32(0x0fe50028u,34);
+            stop("wstring_range_invalid_parameter",destination);
+        }
+        wr16(destination+2*index,0);
+        uint32_t result=count==0xffffffffu && rd16(source+2*index)?80:0;
+        api_return(c,0,result);return;
+    }
+    if(!strcmp(name,"__std_type_info_compare")) {
+        uint32_t left=rd32(c->r[4]+4),right=rd32(c->r[4]+8);
+        if(left==right){api_return(c,0,0);return;}
+        /* x86 data has a four-byte cached-name pointer; comparison skips the decorated prefix. */
+        for(uint32_t index=5;;index++) {
+            uint8_t a=rd8(left+index),b=rd8(right+index);
+            if(a!=b){api_return(c,0,a<b?0xffffffffu:1);return;}
+            if(!a){api_return(c,0,0);return;}
+        }
+    }
     if(!strcmp(name,"CreateEventW") || !strcmp(name,"CreateEventA")) {
         api_return(c,4,create_event(c,!strcmp(name,"CreateEventW")));return;
     }

@@ -80,6 +80,30 @@ class RuntimePreparationTest(unittest.TestCase):
             with self.subTest(code=code),self.assertRaises(ValueError):
                 prepare.ilt_entries(image,image.base,image.base+end)
 
+    def test_readonly_callback_table_referenced_by_code_seeds_verified_thunks(self):
+        image=SyntheticImage((bytes.fromhex("6810104000c3e900000000c3")+bytes(4)+struct.pack("<I",0x401006)).hex())
+        image.is_exec=lambda address:image.base<=address<image.base+12
+        thunks,_=prepare.ilt_entries(image,image.base+6,image.base+11)
+        blocks,_=prepare.decode_graph(image,[image.base],10,thunks,[(image.base+16,image.end)])
+        self.assertEqual(set(blocks),{image.base,image.base+6,image.base+11})
+        blocks,_=prepare.decode_graph(image,[image.base],10,thunks)
+        self.assertEqual(set(blocks),{image.base})
+        blocks,frontier=prepare.decode_graph(image,[image.base,image.base+11],2,thunks,[(image.base+16,image.end)])
+        self.assertEqual(set(blocks),{image.base,image.base+11})
+        self.assertEqual(frontier,[image.base+6])
+
+    def test_retained_blocks_require_matching_identities_and_valid_addresses(self):
+        report=dict(source_sha256="source",kit_commit="translator",block_addresses=["0x401000","0x401000"])
+        self.assertEqual(prepare.retained_roots(report,"source","translator"),[0x401000])
+        for change in (dict(source_sha256="other"),dict(kit_commit="other"),
+                       dict(block_addresses=[-1]),dict(block_addresses=["0x100000000"]),
+                       dict(block_addresses="0x401000")):
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                prepare.retained_roots(report|change,"source","translator")
+        for invalid in (None,[],{}):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                prepare.retained_roots(invalid,"source","translator")
+
 
 if __name__ == "__main__":
     unittest.main()

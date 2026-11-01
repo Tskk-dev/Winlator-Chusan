@@ -23,8 +23,8 @@ def freeze_source(output):
     (output / "runtime-source.c").write_bytes((ROOT / "runtime/runtime.c").read_bytes())
 
 
-def run_stop(command, log, timeout=60):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+def run_stop(command, log, timeout=60, env=None):
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,env=env)
     log.write_text(result.stderr, encoding="utf-8")
     if result.returncode != 20:
         raise ValueError(f"Runtime exited {result.returncode}: {result.stderr[-1500:]}")

@@ -34,12 +34,30 @@ def checked_header(source):
     return source
 
 
-def decode_graph(image, roots, limit, thunks=frozenset()):
+def decode_graph(image, roots, limit, thunks=frozenset(), readonly=()):
     """Follow actual direct flow, splitting at every transfer; indirect flow stays pending."""
     queue = deque(roots)
     decoded = {}
     instruction_bytes = {}
     frontier = set()
+    table_cache={}
+    def callbacks(value):
+        if value in thunks:
+            return (value,)
+        if value in table_cache:
+            return table_cache[value]
+        found=[]
+        if thunks and not value%4:
+            for first,last in readonly:
+                if first<=value<last and not image.is_exec(value):
+                    cursor=value
+                    while cursor+4<=last:
+                        target=int.from_bytes(image.data[cursor-image.base:cursor-image.base+4],"little")
+                        if target not in thunks:break
+                        found.append(target);cursor+=4
+                    break
+        table_cache[value]=found
+        return found
     while queue and len(decoded) < limit:
         address = queue.popleft()
         if address in decoded:
@@ -61,8 +79,9 @@ def decode_graph(image, roots, limit, thunks=frozenset()):
                 instruction_bytes[byte] = pc
             block.append(insn)
             if insn.mnemonic in ("push","mov"):
-                queue.extend(operand.imm for operand in insn.operands
-                             if operand.type==X86_OP_IMM and operand.imm in thunks)
+                for operand in insn.operands:
+                    if operand.type==X86_OP_IMM:
+                        queue.extend(callbacks(operand.imm))
             pc += insn.size
             jump = insn.group(capstone.CS_GRP_JUMP)
             call = insn.group(capstone.CS_GRP_CALL)
@@ -104,7 +123,19 @@ def ilt_entries(image,start,end):
                                    "sha256":hashlib.sha256(image.data[start-image.base:end-image.base]).hexdigest()}
 
 
-def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt=None):
+def retained_roots(report,source_hash,commit):
+    if not isinstance(report,dict):
+        raise ValueError("Invalid retained block report")
+    values=report.get("block_addresses")
+    if report.get("source_sha256")!=source_hash or report.get("kit_commit")!=commit:
+        raise ValueError("Retained blocks differ from pinned source or translator")
+    if not isinstance(values,list) or len(values)>100000 or any(
+        not isinstance(value,str) or not re.fullmatch(r"0x[0-9a-f]{1,8}",value) for value in values):
+        raise ValueError("Invalid retained block addresses")
+    return list(dict.fromkeys(int(value,16) for value in values))
+
+
+def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt=None, retained=None):
     profile = profile or json.loads((ROOT / "profiles/startup-initializer.json").read_text())
     source_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
     if source_hash != profile["source_sha256"]:
@@ -112,6 +143,9 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
     commit = subprocess.check_output(["git", "-C", str(kit), "rev-parse", "HEAD"], text=True).strip()
     if commit != profile["kit_commit"]:
         raise ValueError("Translator commit differs from pinned profile")
+    previous=retained_roots(retained,source_hash,commit) if retained is not None else []
+    if len(previous)>limit:
+        raise ValueError("Block limit is smaller than the retained block count")
     subprocess.run(["git", "-C", str(kit), "diff", "--exit-code", "HEAD", "--"], check=True, capture_output=True)
     if subprocess.check_output(["git", "-C", str(kit), "ls-files", "--others", "--exclude-standard",
                                 "--", "tools/recomp", "runtime"], text=True).strip():
@@ -125,6 +159,8 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
 
     image = RuntimeImage(str(executable))
     image.md.detail = True
+    if any(not image.is_exec(address) for address in previous):
+        raise ValueError("Retained block is not executable")
     with pefile.PE(str(executable), fast_load=True) as pe:
         pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
                                                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_TLS"]])
@@ -152,7 +188,11 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
         roots=[*roots,*callbacks];table_metadata.append(description)
     roots=list(dict.fromkeys(roots))
     thunks,ilt_metadata=ilt_entries(image,*ilt) if ilt else (frozenset(),None)
-    blocks, frontier = decode_graph(image, [entry, *roots], limit,thunks)
+    # Broad table discovery starts after a baseline exists, so its cutoff cannot displace startup code.
+    readonly=[(r["base"],r["base"]+r["size"]) for r in regions if r["flags"]==1] if previous else []
+    blocks, frontier = decode_graph(image, [entry,*previous,*roots], limit,thunks,readonly)
+    if not set(previous).issubset(blocks):
+        raise ValueError("Block cutoff omitted retained code")
     class RuntimeTranslator(module.Translator):
         def _emit(self, fn, index, insn, mnemonic, following, live):
             if mnemonic in ("MOVLPD", "MOVLPS", "MOVHPD", "MOVHPS"):
@@ -232,6 +272,9 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
               "extra_roots": [hex(x) for x in roots], "eager_flags": True, "seh": "guest_chain_only",
               "image_sha256": hashlib.sha256(image.data).hexdigest(), "full_boot_verified": False}
     report["initializer_tables"]=table_metadata
+    report["retained_blocks"]=len(previous)
+    report["readonly_callback_recovery"]=bool(previous)
+    report["block_addresses"]=[hex(address) for address in sorted(blocks)]
     report["incremental_link_table"]=ilt_metadata
     report["translation_units"]=units
     report["indirect_sites"] = [hex(insn.address) for instructions in blocks.values() for insn in instructions
@@ -250,6 +293,7 @@ def main():
     parser.add_argument("--root", action="append", default=[], type=lambda v: int(v, 0))
     parser.add_argument("--init-table", action="append", default=[], type=lambda v: tuple(int(p,0) for p in v.split(":")))
     parser.add_argument("--ilt-range", type=lambda v: tuple(int(p,0) for p in v.split(":")))
+    parser.add_argument("--retain-report",type=Path)
     args = parser.parse_args()
     try:
         if not args.output.resolve().is_relative_to(ROOT / ".work") or not 1 <= args.max_blocks <= 100000:
@@ -258,9 +302,10 @@ def main():
             raise ValueError("Initializer tables use START:END bounds")
         if args.ilt_range and len(args.ilt_range)!=2:
             raise ValueError("Incremental-link table uses START:END bounds")
+        retained=json.loads(args.retain_report.read_text()) if args.retain_report else None
         report = generate(args.exe.resolve(), args.kit.resolve(), args.output.resolve(), args.root, args.max_blocks,
-                          tables=args.init_table,ilt=args.ilt_range)
-        print(json.dumps({key: value for key, value in report.items() if key not in ("frontier", "translation_errors", "indirect_sites", "extra_roots", "translation_units")}, indent=2))
+                          tables=args.init_table,ilt=args.ilt_range,retained=retained)
+        print(json.dumps({key: value for key, value in report.items() if key not in ("frontier", "translation_errors", "indirect_sites", "extra_roots", "translation_units", "block_addresses")}, indent=2))
         print(f"Pending direct targets: {len(report['frontier'])}; guarded translation errors: {len(report['translation_errors'])}")
     except (ValueError, OSError, subprocess.SubprocessError, pefile.PEFormatError) as error:
         print(f"Preparation failed: {error}", file=sys.stderr)

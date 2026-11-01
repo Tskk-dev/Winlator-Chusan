@@ -59,6 +59,8 @@ silently inherit a blanket success response.
    Do not invent callbacks. Qualify auxiliary DLL TLS and relocation support.
    Active: the new bounded block runtime executes actual entry/CRT code on
    Windows and ARM64 and iteratively records the first missing operation.
+   Latest: four C and 425 C++ callbacks complete on both platforms.
+   [Constructor evidence](verification/constructor-runtime-2026-11-01.md).
    Four inspected C initializer table members are admitted as roots. Native
    callback iteration, cdecl stack handling and selected CRT adapters are
    implemented; full startup remains unproved.

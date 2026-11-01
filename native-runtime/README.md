@@ -50,10 +50,11 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   initializer callbacks. Windows x64 and physical ARM64 both reach
   `CreateEventW` after 271 blocks and 21 native API calls. This is a partial
   startup checkpoint; [scope and identities](verification/startup-bringup-2026-10-31.md).
-- The expanded runtime completes all four C initializers and 239 C++ callbacks
-  on both Windows and the physical tablet. Both execute 12,980 block visits
-  and 517 import dispatches, stopping at `_mktime64`. [Startup evidence](verification/startup-bringup-2026-11-01.md).
-  All 33 tooling tests and 29 synthetic scenarios pass. The selected-driver
+- The expanded runtime completes all four C initializers and 425 C++ callbacks
+  on both Windows and the physical tablet. Both execute 27,089 block visits
+  and 1,679 import dispatches before the next untranslated constructor.
+  [Startup evidence](verification/constructor-runtime-2026-11-01.md).
+  All 35 tooling tests and 40 synthetic scenarios pass. The selected-driver
   GPU test also passes all 16 pixels with stock and Turnip.
   [Graphics evidence](verification/vulkan-draw-2026-11-01.md).
 - **Not verified:** a complete calling convention or
@@ -230,6 +231,7 @@ discovery. The extra guard thunk was observed during execution:
 
 ```powershell
 python native-runtime/tools/prepare_runtime.py --exe '<private game bin>/chusanApp.exe' --kit '<pinned recomp-kit checkout>' --output native-runtime/.work/startup-expanded --max-blocks 28000 --init-table 0x172d8d8:0x172ddec --init-table 0x172c000:0x172d7d4 --ilt-range 0x401005:0x471715 --root 0x41dd86
+python native-runtime/tools/prepare_runtime.py --exe '<private game bin>/chusanApp.exe' --kit '<pinned recomp-kit checkout>' --output native-runtime/.work/startup-expanded --max-blocks 44000 --init-table 0x172d8d8:0x172ddec --init-table 0x172c000:0x172d7d4 --ilt-range 0x401005:0x471715 --root 0x41dd86 --retain-report native-runtime/.work/startup-expanded/preparation.json
 python native-runtime/tools/run_runtime.py --prepare-dir native-runtime/.work/startup-expanded --kit '<pinned recomp-kit checkout>' --clang '<llvm-mingw>/bin/clang.exe' --android-clang '<NDK>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd' --adb '<platform-tools>/adb.exe' --serial '<adb serial>'
 ```
 
@@ -241,6 +243,9 @@ and diagnostics stay in `.work/`; temporary device files are removed.
 Generated C is split into cached translation units, with a response file for
 linking larger builds on Windows. Use `--host-only` without the Android arguments
 when the tablet is unavailable.
+Retained expansion validates the prior report's identities and keeps every
+earlier block before following additional read-only callback tables. The report
+is loaded before output is rewritten, so retaining the same directory is valid.
 
 The consumer uses the pinned instruction header with bounds/permission checks
 inserted into all 15 memory accessors in a private generated copy, including
@@ -260,6 +265,9 @@ recursion on the primary guest thread. Win32 TLS has separate inline/expansion
 slots; it does not overwrite module static TLS. The initial guest heap supports
 aligned/ordinary allocation and freeing within a 176 MiB arena, with 8,192 live
 allocation records. General multithreading and the remaining CRT calls are pending.
+Calendar conversion, UTF-16 bounded copying and RTTI name comparison now cover
+the reached constructor calls. Calendar fixtures use UTC in their own processes;
+normal startup uses the platform timezone.
 
 Synthetic programs test loops/calls/returns, callback iteration/short circuit,
 instruction budget, memory protection, 53-bit control state and SIMD data moves.

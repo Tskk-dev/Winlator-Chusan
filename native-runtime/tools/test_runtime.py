@@ -1,5 +1,6 @@
 """End-to-end synthetic x86 tests for the compiled block runtime; no game input."""
 import argparse
+from datetime import datetime,timezone
 import hashlib
 import json
 import os
@@ -65,7 +66,7 @@ def event_program(manual=False, named=False, blocking=False):
     return {0:code,0x700:"event-\u96ea\0".encode("utf-16-le")}, imports
 
 
-def calls_program(imports, operations):
+def calls_program(imports, operations,cdecl=frozenset()):
     code,branches=bytearray(),[]
     for symbol,args,expected in operations:
         if symbol=="read32":
@@ -74,6 +75,9 @@ def calls_program(imports, operations):
             for argument in reversed(args):
                 code.extend(b"\x68"+struct.pack("<I",argument))
             code.extend(b"\xff\x15"+struct.pack("<I",0x401880+4*imports.index(symbol)))
+            if symbol in cdecl:
+                assert len(args)*4<128
+                code.extend(bytes.fromhex("83c4")+bytes([len(args)*4]))
         if expected is None:
             continue
         code.extend(b"\x3d"+struct.pack("<I",expected)+b"\x0f\x85")
@@ -110,6 +114,25 @@ def heap_program(aligned=True, double_free=False):
     failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
     for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
     return {0:code},imports
+
+
+def calendar_program(year,invalid=False):
+    code=bytearray.fromhex("6800174000ff158018400083c404")
+    branches=[]
+    expected=-1 if invalid else int(datetime(year,1,1,4,1,5,tzinfo=timezone.utc).timestamp())
+    def compare(value):
+        code.extend(b"\x3d"+struct.pack("<I",value&0xffffffff)+b"\x0f\x85")
+        branches.append(len(code));code.extend(bytes(4))
+    compare(expected);code.extend(bytes.fromhex("89d0"));compare(expected>>32)
+    if invalid:
+        code.extend(bytes.fromhex("ff15841840008b00"));compare(22)
+    else:
+        for index,value in ((0,5),(1,1),(5,year-1900),(6,(datetime(year,1,1).weekday()+1)%7),(7,0),(8,0)):
+            code.extend(b"\xa1"+struct.pack("<I",0x401700+4*index));compare(value)
+    code.extend(bytes.fromhex("b80d600000c3"))
+    failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+    for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+    return {0:code,0x700:struct.pack("<9i",65,0,4,1,0,year-1900,0,0,0)},["_mktime64","_errno"]
 
 
 def scenarios():
@@ -163,6 +186,29 @@ def scenarios():
     for name,aligned,double_free in (("heap-aligned",True,False),("heap-normal",False,False),("heap-double-free",True,True)):
         patches,imports=heap_program(aligned,double_free)
         yield name,patches,[],False,imports,("heap_invalid_free" if double_free else "entry_returned"),(None if double_free else "0x0000600d")
+    for year,invalid in ((2015,False),(2200,False),(1969,True),(3001,True)):
+        patches,imports=calendar_program(year,invalid)
+        yield "calendar-"+str(year),patches,[],True,imports,"entry_returned","0x0000600d"
+    for name,capacity,count,result,words in (
+        ("limited",8,2,0,[0x004196ea,0xa5a50000]),
+        ("short",8,7,0,[0x004196ea,0x00000042,0xa5a5a5a5]),
+        ("truncated",3,0xffffffff,80,[0x004196ea,0xa5a50000]),
+        ("exact",4,0xffffffff,0,[0x004196ea,0x00000042]),
+        ("zero",8,0,0,[0xa5a50000]),
+        ("range",3,3,None,[])):
+        operations=[("wcsncpy_s",[0x401700,capacity,0x401740,count],result)]
+        operations.extend(("read32",[0x401700+4*i],value) for i,value in enumerate(words))
+        patches,imports=calls_program(["wcsncpy_s"],operations,{"wcsncpy_s"})
+        patches.update({0x700:bytes([0xa5])*32,0x740:"\u96eaAB\0".encode("utf-16-le")})
+        yield "wstring-"+name,patches,[],True,imports,("wstring_range_invalid_parameter" if name=="range" else "entry_returned"),("0x00401700" if name=="range" else "0x0000600d")
+    pairs=[(0x401700,0x401700,0),(0x401700,0x401740,0xffffffff),
+           (0x401740,0x401700,1),(0x401700,0x401780,0),(0x401780,0x401700,0),
+           (0x401700,0x4017c0,0xffffffff),(0x4017c0,0x401740,1)]
+    patches,imports=calls_program(["__std_type_info_compare"],
+        [("__std_type_info_compare",[left,right],expected) for left,right,expected in pairs],{"__std_type_info_compare"})
+    for offset,name in ((0x700,b".Alpha\0"),(0x740,b".Beta\0"),(0x780,b"!Alpha\0"),(0x7c0,b".\x80\0")):
+        patches[offset]=struct.pack("<I",0xdeadbeef)+name
+    yield "type-info",patches,[],False,imports,"entry_returned","0x0000600d"
     module = bytes.fromhex("6800134000ff155811400085c00f95c00fb6c0c3")
     yield "kernel-module", {0: module, 0x300: "kernel32.dll\0".encode("utf-16-le")}, [], False, "GetModuleHandleW", "entry_returned", "0x00000001"
     optional = bytes.fromhex("6800134000680000d80fff155811400064a134000000c3")
@@ -252,7 +298,8 @@ def main():
         freeze_source(output)
         target = ["--target=x86_64-w64-windows-gnu"] if os.name == "nt" else []
         executable = build(args.clang.resolve(), target, kit, output)
-        observed = run_stop([str(executable), str(output / "image.bin")], output / "host.log")
+        environment=(os.environ | {"TZ":"UTC0"}) if name.startswith("calendar-") else None
+        observed = run_stop([str(executable), str(output / "image.bin")], output / "host.log",env=environment)
         assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
         if name in ("initterm", "initterm-e"):
             assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
@@ -268,7 +315,8 @@ def main():
                 adb("push", str(android), remote + "/runtime")
                 adb("push", str(output / "image.bin"), remote + "/image.bin")
                 adb("shell", "chmod", "700", remote + "/runtime")
-                observed = run_stop([*command, "shell", remote + "/runtime", remote + "/image.bin"], output / "android.log")
+                timezone_args=["env","TZ=UTC0"] if environment else []
+                observed = run_stop([*command, "shell",*timezone_args,remote + "/runtime", remote + "/image.bin"], output / "android.log")
                 assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
                 if name in ("initterm", "initterm-e"):
                     assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
