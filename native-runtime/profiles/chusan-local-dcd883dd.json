@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "chusan-local-dcd883dd",
+  "game_version": null,
+  "status": "native_startup_initializers_verified",
+  "target_abi": "arm64-v8a",
+  "startup_compatibility_record": "startup-compatibility-dcd883dd.json",
+  "routine_probe": {
+    "va": "0x595550",
+    "bytes": 9,
+    "sha256": "88475fb03db5f2e7aff1e78ad14bceb211175f66f7b819734a9b4f455f667e7a",
+    "scope": "Isolated pointer reads, EAX result and defined ADD flags; caller semantics unclassified"
+  },
+  "binaries": [
+    {
+      "file": "chusanApp.exe",
+      "architecture": "x86",
+      "sha256": "dcd883ddd41d6e0a26a8902d8c94dd123c5e8dd5990dd6a428e6b421195d38ca"
+    },
+    {
+      "file": "amdaemon.exe",
+      "architecture": "x86_64",
+      "sha256": "014992a5af1b62b5fd42d2cb0c19a38aba4b5437a3ef82d304de2c93065ed70d"
+    },
+    {
+      "file": "cg.dll",
+      "architecture": "x86",
+      "sha256": "d7c5eadbcad39cbb2e6a3ec839d747bf85f3470cf07c9e5c9873546bd6197b2e"
+    },
+    {
+      "file": "cgD3D9.dll",
+      "architecture": "x86",
+      "sha256": "ee53cefd468d9fca36c8dc32f196e2abf77537ec7492cf77349c221230b96b64"
+    },
+    {
+      "file": "emotedriver.dll",
+      "architecture": "x86",
+      "sha256": "acefbf536592c83cd3f4d23ef1fbb429868a4edf1bc6f5ae486c63c4ad38c911"
+    }
+  ]
+}
