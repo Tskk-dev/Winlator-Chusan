@@ -50,17 +50,19 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   initializer callbacks. Windows x64 and physical ARM64 both reach
   `CreateEventW` after 271 blocks and 21 native API calls. This is a partial
   startup checkpoint; [scope and identities](verification/startup-bringup-2026-10-31.md).
-- The expanded runtime completes all four C initializers and 425 C++ callbacks
+- An earlier expanded runtime completed all four C initializers and 425 C++ callbacks
   on both Windows and the physical tablet. Both execute 27,089 block visits
   and 1,679 import dispatches before the next untranslated constructor.
   [Startup evidence](verification/constructor-runtime-2026-11-01.md).
   All 35 tooling tests and 40 synthetic scenarios pass. The selected-driver
   GPU test also passes all 16 pixels with stock and Turnip.
   [Graphics evidence](verification/vulkan-draw-2026-11-01.md).
-- A later host-only continuation completes 674 C++ callbacks and stops at the
-  unresolved `CreateHardLinkW` capability lookup. The new ARM64 startup comparison
-  is pending; 425 remains the last shared startup checkpoint.
-  [Continuation evidence](verification/constructor-continuation-2026-11-01.md).
+- The latest runtime completes all four C and 959 C++ callbacks on Windows and
+  physical ARM64, with identical 65,870 block visits and 3,151 API dispatches.
+  Both stop at `GetStartupInfoW` in the remaining CRT startup path. This includes
+  a scalar MOVSD translation fix, native exception message ownership and two
+  explicit unavailable filesystem export queries.
+  [Complete initializer evidence](verification/startup-963-initializers-2026-11-01.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.

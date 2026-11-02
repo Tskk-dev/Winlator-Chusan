@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "kind": "compiled-compatibility-record",
+  "source_sha256": "dcd883ddd41d6e0a26a8902d8c94dd123c5e8dd5990dd6a428e6b421195d38ca",
+  "scope": "Fixed optional filesystem export policy in the native startup runtime; not a user-selectable configuration",
+  "api": "GetProcAddress",
+  "module": "kernel32.dll",
+  "module_handle": "0x0fd80000",
+  "exports": ["CreateHardLinkW", "CreateSymbolicLinkW"],
+  "arguments": "Exact case-sensitive export names and the compatibility kernel module handle; other names or modules still stop",
+  "result": {"pointer": 0, "last_error": 127},
+  "counter": "optional_filesystem_exports_absent",
+  "first_use_logging": "Once per export per process",
+  "consumer_evidence": {
+    "CreateHardLinkW": {"initializer": "0x00521d80", "pointer": "0x01cc50c4", "null_check": "0x00e47417"},
+    "CreateSymbolicLinkW": {"initializer": "0x00521db0", "pointer": "0x01cc50d0", "null_checks": ["0x00e47337", "0x00e474b7"]}
+  },
+  "limitation": "The wrappers pass ERROR_NOT_SUPPORTED (50) to their error helper for a null function pointer. No hard link, symbolic link, copy fallback or filesystem mutation is implemented or acknowledged by these query results. Implement real filesystem behavior if a required file workflow reaches it."
+}

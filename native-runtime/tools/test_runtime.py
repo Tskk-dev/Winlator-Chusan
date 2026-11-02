@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 import capstone
-from capstone.x86_const import X86_OP_MEM
+from capstone.x86_const import X86_OP_IMM, X86_OP_MEM
 
 from prepare_runtime import generate, ROOT
 from run_runtime import build, freeze_source, run_stop
@@ -73,6 +73,8 @@ def calls_program(imports, operations,cdecl=frozenset()):
     for symbol,args,expected in operations:
         if symbol=="read32":
             code.extend(b"\xa1"+struct.pack("<I",args[0]))
+        elif symbol=="write32":
+            code.extend(b"\xc7\x05"+struct.pack("<II",*args))
         else:
             for argument in reversed(args):
                 code.extend(b"\x68"+struct.pack("<I",argument))
@@ -118,6 +120,29 @@ def heap_program(aligned=True, double_free=False):
     return {0:code},imports
 
 
+def exception_program(kind):
+    imports=["__std_exception_copy","__std_exception_destroy","malloc","free","_errno"]
+    borrowed=kind=="borrowed";message=0 if kind=="null" else (0xdeadbeef if kind=="invalid" else 0x401700)
+    operations=[]
+    if kind=="oom":operations.append(("malloc",[0x0b000000],0x03000000))
+    operations.append(("__std_exception_copy",[0x401720,0x401740],None))
+    if kind=="oom":
+        operations.extend([("read32",[0x401740],0x11111111),("read32",[0x401744],0x3322117f),
+                           ("_errno",[],0x0fe50028),("read32",[0x0fe50028],12),("free",[0x03000000],None)])
+    else:
+        target=message if borrowed or kind=="null" else 0x03000000
+        operations.extend([("read32",[0x401740],target),("read32",[0x401744],0x33221100+int(bool(message) and not borrowed))])
+        if message and kind!="invalid":
+            operations.extend([("write32",[message,0x41424344],None),
+                               ("read32",[target],0x41424344 if borrowed else 0x6c796170)])
+        operations.extend([("__std_exception_destroy",[0x401740],None),("read32",[0x401740],0),
+                           ("read32",[0x401744],0x33221100),("malloc",[12],0x03000000),("free",[0x03000000],None)])
+    patches,_=calls_program(imports,operations,frozenset(imports))
+    patches.update({0x700:b"payload1234\0",0x720:struct.pack("<IB3B",message,int(not borrowed),0xaa,0xbb,0xcc),
+                    0x740:struct.pack("<IB3B",0x11111111,0x7f,0x11,0x22,0x33)})
+    return patches,imports
+
+
 def calendar_program(year,invalid=False):
     code=bytearray.fromhex("6800174000ff158018400083c404")
     branches=[]
@@ -155,7 +180,42 @@ def paddd_program(source=0x401710):
             0x710:struct.pack("<4I",1,1,0x80000000,0xfedcba98)},["GetLastError"]
 
 
+def scalar_movsd_program(source=0x401723):
+    code=bytearray.fromhex("565731f631fff30f6f0500174000f30f6f0d1017400039c0f9f20f1005")
+    code.extend(struct.pack("<I",source))
+    code.extend(bytes.fromhex("f30f7f0540174000f30f6f0500174000f20f10c1f30f7f0550174000f20f110d711740009c5a89d025d5080000"))
+    branches=[]
+    def compare(value):
+        code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+    compare(0x45)
+    code.extend(bytes.fromhex("89f0"));compare(0)
+    code.extend(bytes.fromhex("89f8"));compare(0)
+    for address,values in ((0x401740,(0x05060708,0x01020304,0,0)),
+                           (0x401750,(0x55555555,0x66666666,0x33333333,0x44444444)),
+                           (0x401771,(0x55555555,0x66666666))):
+        for lane,value in enumerate(values):
+            code.extend(b"\xa1"+struct.pack("<I",address+4*lane));compare(value)
+    code.extend(bytes.fromhex("be00174000bf90174000fca589f0"));compare(0x401704)
+    code.extend(bytes.fromhex("89f8"));compare(0x401794)
+    code.extend(bytes.fromhex("a190174000"));compare(0x11111111)
+    code.extend(bytes.fromhex("b80d6000005f5ec3"))
+    failure=len(code);code.extend(bytes.fromhex("b8ad0b00005f5ec3"))
+    for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+    assert len(code)<0x700
+    return {0:code,0x700:struct.pack("<4I",0x11111111,0x22222222,0x33333333,0x44444444),
+            0x710:struct.pack("<4I",0x55555555,0x66666666,0x77777777,0x88888888),
+            0x723:struct.pack("<Q",0x0102030405060708)},["GetLastError"]
+
+
 def scenarios():
+    for name,source,stop,target in (("simd-scalar-double",0x401723,"entry_returned","0x0000600d"),
+                                    ("simd-scalar-double-memory",0x402000,"read_permission","0x00402000")):
+        patches,imports=scalar_movsd_program(source)
+        yield name,patches,[],True,imports,stop,target
+    for kind in ("owned","borrowed","null","oom","invalid","readonly"):
+        patches,imports=exception_program(kind)
+        stop,target=("read_bounds","0xdeadbeef") if kind=="invalid" else (("write_permission","0x00401740") if kind=="readonly" else ("entry_returned","0x0000600d"))
+        yield "exception-data-"+kind,patches,[],kind!="readonly",imports,stop,target
     loop = bytearray.fromhex("b800000000b905000000e8110000004975f8c3")
     loop.extend(bytes(0x20-len(loop)))
     loop.extend(bytes.fromhex("01c8c3"))
@@ -240,6 +300,13 @@ def scenarios():
         yield "main-module"+suffix, {0: bytes.fromhex("6a00ff1558114000c3")}, [], False, api, "entry_returned", "0x00400000"
     optional = bytes.fromhex("6800134000680000d80fff155811400064a134000000c3")
     yield "optional-export", {0: optional, 0x300: b"InitializeConditionVariable\0"}, [], False, "GetProcAddress", "entry_returned", "0x0000007f"
+    for name,handle,symbol in (("filesystem-export-absent",0x0fd80000,b"CreateHardLinkW\0"),
+                               ("filesystem-export-symlink-absent",0x0fd80000,b"CreateSymbolicLinkW\0"),
+                               ("dynamic-export-unknown",0x0fd80000,b"createhardlinkw\0"),
+                               ("dynamic-export-wrong-module",0x0fd80010,b"CreateHardLinkW\0")):
+        code=bytes.fromhex("680013400068")+struct.pack("<I",handle)+bytes.fromhex("ff155811400085c0750764a134000000c3b8ad0b0000c3")
+        positive=name.startswith("filesystem-export-")
+        yield name,{0:code,0x300:symbol},[],False,"GetProcAddress",("entry_returned" if positive else "dynamic_export"),("0x0000007f" if positive else "0x00401300")
     registration=bytearray()
     branches=[]
     for pointer,previous in ((0x401080,0),(0x401090,0x401080)):
@@ -328,10 +395,12 @@ def main():
         environment=(os.environ | {"TZ":"UTC0"}) if name.startswith("calendar-") else None
         observed = run_stop([str(executable), str(output / "image.bin")], output / "host.log",env=environment)
         assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
+        if name.startswith("filesystem-export-") or name in ("dynamic-export-unknown","dynamic-export-wrong-module"):
+            assert observed["stubs"]["optional_filesystem_exports_absent"]==int(name.startswith("filesystem-export-")),observed
         if name in ("initterm", "initterm-e"):
             assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
         results[name] = {"host": observed}
-        if os.name=="nt" and name.startswith("simd-paddd"):
+        if os.name=="nt" and name.startswith(("simd-paddd","simd-scalar-double")):
             oracle=output/"original-x86.exe"
             subprocess.run([str(args.clang.resolve()),"--target=i686-w64-windows-gnu","-O1","-Wall","-Wextra","-Werror",
                             str(ROOT/"tests/x86_simd_oracle_win.c"),"-Wl,--image-base,0x30000000",
@@ -343,10 +412,14 @@ def main():
                        and 0x400000<=op.mem.disp<0x403000 for op in instruction.operands):
                     assert instruction.disp_size==4
                     relocations.append(instruction.address-0x400000+instruction.disp_offset)
+                if (not instruction.group(capstone.CS_GRP_CALL) and not instruction.group(capstone.CS_GRP_JUMP)
+                        and any(op.type==X86_OP_IMM and 0x400000<=op.imm<0x403000 for op in instruction.operands)):
+                    assert instruction.imm_size==4
+                    relocations.append(instruction.address-0x400000+instruction.imm_offset)
             relocation_file=output/"oracle-relocations.bin"
             relocation_file.write_bytes(struct.pack("<"+"I"*len(relocations),*relocations))
             reference=json.loads(subprocess.check_output([str(oracle),str(output/"image.bin"),str(relocation_file)],text=True,timeout=30))
-            assert reference==({"return":0x600d} if name=="simd-paddd" else {"fault":"0xc0000005"}),reference
+            assert reference==({"return":0x600d} if expected_stop=="entry_returned" else {"fault":"0xc0000005"}),reference
             results[name]["original_x86"]=reference
         if serial:
             android = build(args.android_clang.resolve(), [], kit, output, android=True)
@@ -362,6 +435,8 @@ def main():
                 timezone_args=["env","TZ=UTC0"] if environment else []
                 observed = run_stop([*command, "shell",*timezone_args,remote + "/runtime", remote + "/image.bin"], output / "android.log")
                 assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
+                if name.startswith("filesystem-export-") or name in ("dynamic-export-unknown","dynamic-export-wrong-module"):
+                    assert observed["stubs"]["optional_filesystem_exports_absent"]==int(name.startswith("filesystem-export-")),observed
                 if name in ("initterm", "initterm-e"):
                     assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
                 results[name]["android"] = observed

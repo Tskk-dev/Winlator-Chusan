@@ -18,6 +18,8 @@ static uint8_t pages[GUEST_SIZE/4096];
 static jmp_buf dispatch;
 static X86 cpu;
 static uint64_t executed, api_calls, feature_stub_calls, cpuid_stub_calls, environment_stub_calls, optional_export_calls;
+static uint64_t optional_filesystem_export_calls;
+static uint32_t optional_filesystem_exports_seen;
 static uint32_t block_pc, block_last;
 typedef struct {uint32_t esp, cursor, end;int check_result;} InitializerFrame;
 static InitializerFrame initializers[32];
@@ -44,9 +46,10 @@ static void stop(const char *kind,uint32_t target) {
            ",\"esp\":\"0x%08x\",\"c_initializers_completed\":%u,\"cpp_initializers_completed\":%u,"
            "\"stubs\":{\"optional_cpu_features_absent\":%" PRIu64
            ",\"baseline_cpuid\":%" PRIu64 ",\"empty_environment\":%" PRIu64
-           ",\"optional_condition_variables_absent\":%" PRIu64 "},\"full_boot_verified\":false}\n",
+           ",\"optional_condition_variables_absent\":%" PRIu64
+           ",\"optional_filesystem_exports_absent\":%" PRIu64 "},\"full_boot_verified\":false}\n",
            kind,target,block_pc,block_last,executed,api_calls,cpu.r[4],c_initializers_completed,cpp_initializers_completed,
-           feature_stub_calls,cpuid_stub_calls,environment_stub_calls,optional_export_calls);
+           feature_stub_calls,cpuid_stub_calls,environment_stub_calls,optional_export_calls,optional_filesystem_export_calls);
     exit(20);
 }
 static void permit(uint32_t base,uint32_t size,uint8_t flags) {
@@ -342,7 +345,31 @@ static void api(X86 *c,uint32_t index) {
             optional_export_calls++;wr32(c->fs_base+0x34,127);
             fprintf(stderr,"Optional export unavailable: %s\n",export_name);api_return(c,2,0);return;
         }
+        if(handle==0x0fd80000u && (!strcmp(export_name,"CreateHardLinkW") || !strcmp(export_name,"CreateSymbolicLinkW"))) {
+            /* shortcut: the inspected filesystem wrapper reports unsupported when this pointer is null. */
+            uint32_t bit=!strcmp(export_name,"CreateHardLinkW")?1u:2u;
+            if(!(optional_filesystem_exports_seen&bit))fprintf(stderr,"Optional filesystem export unavailable: %s\n",export_name);
+            optional_filesystem_exports_seen|=bit;optional_filesystem_export_calls++;
+            wr32(c->fs_base+0x34,127);api_return(c,2,0);return;
+        }
         fprintf(stderr,"Pending export %s\n",export_name);stop("dynamic_export",symbol);
+    }
+    if(!strcmp(name,"__std_exception_copy")) {
+        uint32_t source=rd32(c->r[4]+4),destination=rd32(c->r[4]+8);
+        uint32_t message=rd32(source);int owned=rd8(source+4)!=0;
+        if(owned && message) {
+            uint32_t length=0;while(rd8(message+length))length++;
+            uint32_t copy=heap_allocate(length+1,4,0);
+            if(!copy){api_return(c,0,0);return;} /* The CRT leaves the destination unchanged on allocation failure. */
+            memcpy(g_mem+copy,g_mem+message,length+1);message=copy;
+        } else owned=0;
+        check(destination,5,1);wr32(destination,message);wr8(destination+4,(uint8_t)owned);
+        api_return(c,0,0);return;
+    }
+    if(!strcmp(name,"__std_exception_destroy")) {
+        uint32_t data=rd32(c->r[4]+4);check(data,5,1);
+        uint32_t message=rd32(data);if(rd8(data+4))heap_release(message,0);
+        wr32(data,0);wr8(data+4,0);api_return(c,0,0);return;
     }
     if(!strcmp(name,"InitializeSListHead")) {
         a0=rd32(c->r[4]+4);if(a0%8)stop("slist_alignment",a0);

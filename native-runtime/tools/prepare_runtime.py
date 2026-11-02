@@ -11,7 +11,7 @@ import sys
 from types import SimpleNamespace
 
 import capstone
-from capstone.x86_const import X86_OP_IMM
+from capstone.x86_const import X86_OP_IMM, X86_OP_REG
 import pefile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +178,13 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
             # The pinned kit's recovery formatter omits its supported vector widths.
             return {16: "xmmword", 32: "ymmword"}.get(nbytes) or super()._size_word(nbytes, mnem)
 
+        def to_insn(self, ci):
+            # MOVSD also names the implicit string instruction. Keep the SSE operands.
+            if ci.mnemonic=="movsd" and any(op.type==X86_OP_REG and ci.reg_name(op.reg).startswith("xmm") for op in ci.operands):
+                operands=[self._op_text(ci,op,"MOVSD") for op in ci.operands]
+                return module.Insn(ci.address,"MOVSD",None,operands,f"{ci.address:08x}  MOVSD "+",".join(operands))
+            return super().to_insn(ci)
+
     image = RuntimeImage(str(executable))
     image.md.detail = True
     if any(not image.is_exec(address) for address in previous):
@@ -218,6 +225,19 @@ def generate(executable, kit, output, roots, limit, profile=None, tables=(), ilt
         raise ValueError("Block cutoff omitted retained code")
     class RuntimeTranslator(module.Translator):
         def _emit(self, fn, index, insn, mnemonic, following, live):
+            if mnemonic=="MOVSD" and insn.ops:
+                dst,src=[module.parse_operand(op) for op in insn.ops]
+                if dst.kind=="xmm" and src.kind in ("xmm","mem"):
+                    value=f"movsd_{index}"
+                    expression=(f"((uint64_t)c->xmm[{src.reg}][0]|((uint64_t)c->xmm[{src.reg}][1]<<32))"
+                                if src.kind=="xmm" else f"rd64({module.addr_expr(src)})")
+                    lines=[f"uint64_t {value}={expression};",f"c->xmm[{dst.reg}][0]=(uint32_t){value};",
+                           f"c->xmm[{dst.reg}][1]=(uint32_t)({value}>>32);"]
+                    if src.kind=="mem":lines.append(f"c->xmm[{dst.reg}][2]=c->xmm[{dst.reg}][3]=0;")
+                    return lines
+                if dst.kind=="mem" and src.kind=="xmm":
+                    return [f"wr64({module.addr_expr(dst)},(uint64_t)c->xmm[{src.reg}][0]|((uint64_t)c->xmm[{src.reg}][1]<<32));"]
+                raise module.TranslateError("Unsupported scalar MOVSD operands")
             if mnemonic == "PADDD":
                 dst,src=[module.parse_operand(op) for op in insn.ops]
                 if dst.kind=="xmm" and src.kind in ("mem","xmm"):

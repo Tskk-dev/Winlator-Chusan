@@ -2,8 +2,9 @@
   "schema": 1,
   "id": "chusan-local-dcd883dd",
   "game_version": null,
-  "status": "identity_and_bounded_host_probe_only",
+  "status": "native_startup_initializers_verified",
   "target_abi": "arm64-v8a",
+  "startup_compatibility_record": "startup-compatibility-dcd883dd.json",
   "routine_probe": {
     "va": "0x595550",
     "bytes": 9,

@@ -1,9 +1,10 @@
 # Host startup continuation
 
-The Windows x64 translation now completes all four C and 674 of 959 C++
-initializer callbacks. The last completed physical ARM64 startup checkpoint
-remains [425 C++ callbacks](constructor-runtime-2026-11-01.md); the new tablet
-comparison is pending. Full game boot remains unverified.
+This intermediate Windows x64 checkpoint completed all four C and 674 of 959
+C++ initializer callbacks. At that point the last physical ARM64 checkpoint was
+[425 C++ callbacks](constructor-runtime-2026-11-01.md), with a new comparison
+pending. It is superseded by the [963-initializer checkpoint on both platforms](startup-963-initializers-2026-11-01.md).
+Full game boot remains unverified.
 
 | Measurement | Windows x64 |
 | --- | --- |

@@ -11,8 +11,9 @@ import uuid
 
 
 def select_device(output, requested=None):
-    devices = [line.split()[:2] for line in output.splitlines()[1:] if line.strip()]
-    ready = [serial for serial, state in devices if state == "device"]
+    devices = [line.split("\t",1) if "\t" in line else line.split(maxsplit=1)
+               for line in output.splitlines()[1:] if line.strip()]
+    ready = [parts[0] for parts in devices if len(parts)==2 and parts[1].split()[:1]==["device"]]
     if requested:
         if requested not in ready:
             raise ValueError("The selected ADB device is not connected and authorized")

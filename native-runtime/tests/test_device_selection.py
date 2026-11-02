@@ -17,6 +17,12 @@ class DeviceSelectionTest(unittest.TestCase):
     def test_single_device_is_selected(self):
         self.assertEqual(device.select_device("List of devices attached\nabc device\n"), "abc")
 
+    def test_wireless_serial_with_spaces_is_preserved(self):
+        serial="adb-tablet (2)._adb-tls-connect._tcp"
+        output="List of devices attached\nold\toffline\n"+serial+"\tdevice\n"
+        self.assertEqual(device.select_device(output),serial)
+        self.assertEqual(device.select_device(output,serial),serial)
+
     def test_multiple_devices_require_explicit_selection(self):
         output = "List of devices attached\nabc device\ndef device\n"
         with self.assertRaises(ValueError):
