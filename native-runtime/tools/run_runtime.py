@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import uuid
@@ -73,6 +74,8 @@ def main():
     parser.add_argument("--clang", type=Path, required=True)
     parser.add_argument("--android-clang", type=Path)
     parser.add_argument("--host-only", action="store_true")
+    parser.add_argument("--content-root", type=Path, help="Read-only host content directory")
+    parser.add_argument("--device-content-root", help="Existing read-only content directory on the tablet")
     parser.add_argument("--adb")
     parser.add_argument("--serial")
     args = parser.parse_args()
@@ -97,7 +100,8 @@ def main():
         windows = build(args.clang.resolve(), ["--target=x86_64-w64-windows-gnu"], kit, output)
         report = {"source_sha256": preparation["source_sha256"], "kit_commit": preparation["kit_commit"],
                   "prepared_blocks": preparation["blocks"], "prepared_instructions": preparation["instructions"],
-                  "windows": run_stop([str(windows), str(output / "image.bin")], output / "windows-stderr.log"),
+                  "windows": run_stop([str(windows), str(output / "image.bin"),
+                                       *([str(args.content_root.resolve())] if args.content_root else [])], output / "windows-stderr.log"),
                   "image_sha256": preparation["image_sha256"], "full_boot_verified": False}
         if not args.host_only:
             android = build(args.android_clang.resolve(), [], kit, output, android=True)
@@ -115,7 +119,8 @@ def main():
             for name, expected in (("runtime", sha(android)), ("image.bin", preparation["image_sha256"])):
                 if adb("-s", serial, "shell", "sha256sum", remote + "/" + name).stdout.split()[0] != expected:
                     raise ValueError("Device artifact hash mismatch")
-            report["android"] = run_stop([args.adb, "-s", serial, "shell", remote + "/runtime", remote + "/image.bin"],
+            report["android"] = run_stop([args.adb, "-s", serial, "shell", remote + "/runtime", remote + "/image.bin",
+                                          *([shlex.quote(args.device_content_root)] if args.device_content_root else [])],
                                           output / "android-stderr.log")
             report["device"] = {key: adb("-s", serial, "shell", "getprop", prop).stdout.strip()
                                 for key, prop in {"model": "ro.product.model", "soc": "ro.soc.model",

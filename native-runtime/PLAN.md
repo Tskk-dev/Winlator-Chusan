@@ -59,9 +59,13 @@ silently inherit a blanket success response.
    Do not invent callbacks. Qualify auxiliary DLL TLS and relocation support.
    Active: the new bounded block runtime executes actual entry/CRT code on
    Windows and ARM64 and iteratively records the first missing operation.
-   Latest: all four C and 959 C++ callbacks complete on both platforms, with
-   matching block/API counts. The next stop is `GetStartupInfoW` in the remaining
-   CRT path. [Evidence](verification/startup-963-initializers-2026-11-01.md).
+   All four C and 959 C++ callbacks complete on both platforms, with matching
+   block/API counts. CRT launch and the application's mutex also pass on both.
+   Host follow-up now passes the first configuration file check and module
+   enumeration, stopping at `WSAStartup`. Fixed C locales, primary-thread
+   library locks and a caller-scoped optional page-scan stub advance startup;
+   later stream changes still need a physical tablet run.
+   [Latest evidence](verification/application-startup-2026-11-02.md).
    Four inspected C initializer table members are admitted as roots. Native
    callback iteration, cdecl stack handling and selected CRT adapters are
    implemented; full startup remains unproved.

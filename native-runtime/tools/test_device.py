@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +17,9 @@ def select_device(output, requested=None):
     ready = [parts[0] for parts in devices if len(parts)==2 and parts[1].split()[:1]==["device"]]
     if requested:
         if requested not in ready:
+            canonical=lambda serial:re.sub(r" \(\d+\)(?=\._adb-tls-connect\._tcp$)","",serial)
+            aliases=[serial for serial in ready if canonical(serial)==canonical(requested)]
+            if len(aliases)==1:return aliases[0]
             raise ValueError("The selected ADB device is not connected and authorized")
         return requested
     if len(ready) != 1:

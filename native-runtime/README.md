@@ -4,11 +4,11 @@ This is the start of a separate native CHUNITHM project in Winlator-Chusan.
 The Windows-container overlay work is deferred. Nothing in this directory
 currently boots CHUNITHM or replaces Wine in the existing Android app.
 
-## Verified on 31 October–1 November 2026
+## Verified on 31 October–2 November 2026
 
 - Read-only inspection recorded 25 top-level PE executables and DLLs from the
   local installation. The main executable is x86; amdaemon is x86-64.
-- `chusanApp.exe` imports 812 functions across 35 DLLs and has a TLS directory.
+- `chusanApp.exe` imports 812 symbols across 35 DLLs and has a TLS directory.
   Declared dependencies include modern MSVC/UCRT, D3D9/D3DX9, Cg, E-mote,
   WinHTTP, sockets, threads and dynamically resolved APIs. Import counts are a
   lower bound: they omit COM methods and dynamically discovered interfaces.
@@ -57,12 +57,19 @@ currently boots CHUNITHM or replaces Wine in the existing Android app.
   All 35 tooling tests and 40 synthetic scenarios pass. The selected-driver
   GPU test also passes all 16 pixels with stock and Turnip.
   [Graphics evidence](verification/vulkan-draw-2026-11-01.md).
-- The latest runtime completes all four C and 959 C++ callbacks on Windows and
+- An earlier runtime completes all four C and 959 C++ callbacks on Windows and
   physical ARM64, with identical 65,870 block visits and 3,151 API dispatches.
   Both stop at `GetStartupInfoW` in the remaining CRT startup path. This includes
   a scalar MOVSD translation fix, native exception message ownership and two
   explicit unavailable filesystem export queries.
   [Complete initializer evidence](verification/startup-963-initializers-2026-11-01.md).
+- The shared host/tablet runtime subsequently passed CRT launch setup and the
+  application's mutex. Host follow-up now opens `project.conf`, passes its
+  stream-state check, and reaches `WSAStartup` after module enumeration.
+  Fixed C locales, single-thread library locks and one inspected optional page
+  scan use explicit, counted compatibility stubs. Twenty new stream/locale/file
+  fixtures pass on Windows; the later stream additions still need a tablet run.
+  [Startup and stub scope](verification/application-startup-2026-11-02.md).
 - **Not verified:** a complete calling convention or
   fault model, function discovery, indirect control flow, SSE/x87, DLL startup,
   game boot, original graphics/audio, network/service behavior or playable speed.

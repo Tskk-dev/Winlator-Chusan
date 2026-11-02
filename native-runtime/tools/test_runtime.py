@@ -68,6 +68,50 @@ def event_program(manual=False, named=False, blocking=False):
     return {0:code,0x700:"event-\u96ea\0".encode("utf-16-le")}, imports
 
 
+def mutex_program(kind):
+    imports=["CreateMutexA","CreateMutexW","WaitForSingleObject","ReleaseMutex","CloseHandle","GetLastError",
+             "CreateEventA","CreateEventW","SetEvent","ResetEvent"]
+    code,failures=bytearray(),[]
+    def push(value):return b"\x68"+struct.pack("<I",value)
+    def call(index,args=b""):code.extend(args+b"\xff\x15"+struct.pack("<I",0x401880+4*index))
+    def expect(value):
+        code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");failures.append(len(code));code.extend(bytes(4))
+    def create(index,owner,name,register=b"\x89\xc3"):
+        call(index,push(name)+push(owner)+push(0))
+        code.extend(bytes.fromhex("85c00f84"));failures.append(len(code));code.extend(bytes(4));code.extend(register)
+    def wait(register=b"\x53"):call(2,push(0)+register);expect(0)
+    def release(register=b"\x53",success=True):call(3,register);expect(int(success))
+    if kind=="named":
+        create(0,0,0x401700);wait()
+        create(1,1,0x401740,b"\x89\xc6");call(5);expect(183)
+        release(b"\x56");release(success=False);call(5);expect(288)
+        call(4,b"\x53");expect(1);wait(b"\x56");call(4,b"\x56");expect(1)
+        create(0,1,0x401700);call(5);expect(0)
+        call(2,push(0)+b"\x56");expect(0xffffffff);call(5);expect(6)
+        release();release(success=False);call(5);expect(288);call(4,b"\x53");expect(1)
+    elif kind=="namespace":
+        call(6,push(0x401700)+push(0)*3);code.extend(b"\x89\xc3")
+        call(1,push(0x401740)+push(0)*2);expect(0);call(5);expect(6)
+        call(8,b"\x53");expect(1);wait();release(success=False);call(5);expect(6)
+        call(4,b"\x53");expect(1);create(0,0,0x401700)
+        call(7,push(0x401740)+push(0)*3);expect(0);call(5);expect(6)
+        call(8,b"\x53");expect(0);call(9,b"\x53");expect(0);call(5);expect(6)
+        release(success=False);call(5);expect(288);wait();release();call(4,b"\x53");expect(1)
+    else:
+        owner=kind=="owned";create(0 if owner else 1,int(owner),0)
+        if not owner:release(success=False);call(5);expect(288)
+        wait();release()
+        if owner:release()
+        release(success=False);call(5);expect(288)
+        wait();call(4,b"\x53");expect(1)
+        call(2,push(0)+b"\x53");expect(0xffffffff)
+        release(success=False);call(5);expect(6)
+    code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+    for offset in failures:struct.pack_into("<i",code,offset,failure-offset-4)
+    assert len(code)<0x700
+    return {0:code,0x700:b"mutex-shared\0",0x740:"mutex-shared\0".encode("utf-16-le")},imports
+
+
 def calls_program(imports, operations,cdecl=frozenset()):
     code,branches=bytearray(),[]
     for symbol,args,expected in operations:
@@ -208,6 +252,167 @@ def scalar_movsd_program(source=0x401723):
 
 
 def scenarios():
+    patches,imports=calls_program(["VirtualQuery"],[("VirtualQuery",[0x401000,0x401700,28],None)])
+    yield "memory-query-unqualified-caller",patches,[],True,imports,"virtual_memory_query","0x0040100f"
+    imports=["GetCurrentProcess","K32GetModuleInformation","SetLastError","GetLastError","GetSystemInfo","K32EnumProcessModules"]
+    patches,_=calls_program(imports,[("GetCurrentProcess",[],0xffffffff),("SetLastError",[0x1234],None),
+        ("K32GetModuleInformation",[0xffffffff,0x400000,0x401700,12],1),
+        ("read32",[0x401700],0x400000),("read32",[0x401704],0x2000),("read32",[0x401708],0x401000),
+        ("read32",[0x40170c],0xa5a5a5a5),("GetSystemInfo",[0x401740],None),
+        *[("read32",[0x401740+4*i],value) for i,value in enumerate((0,4096,0x10000,0x0fffffff,1,1,586,0x10000,6))],
+        ("read32",[0x401764],0xa5a5a5a5),
+        ("K32EnumProcessModules",[0xffffffff,0,0,0x401788],1),("read32",[0x401788],4),
+        ("K32EnumProcessModules",[0xffffffff,0x401780,8,0x401788],1),
+        ("read32",[0x401780],0x400000),("read32",[0x401784],0xa5a5a5a5),("GetLastError",[],0x1234)])
+    patches[0x700]=bytes([0xa5])*16
+    patches[0x740]=bytes([0xa5])*40
+    patches[0x780]=bytes([0xa5])*12
+    yield "main-module-information",patches,[],True,imports,"entry_returned","0x0000600d"
+    code=bytearray();branches=[]
+    for state,expected in ((0,0),(1,0),(2,1),(4,1),(6,1)):
+        code.extend(b"\xc7\x05"+struct.pack("<II",0x40170c,state)+bytes.fromhex("b900174000ff15801840003d"))
+        code.extend(struct.pack("<I",expected)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+    code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+    for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+    yield "basic-ios-fail-state",{0:code},[],True,{
+        "dll":"MSVCP140.dll","names":["?fail@ios_base@std@@QBE_NXZ"]},"entry_returned","0x0000600d"
+    for kind in ("normal","wrong-facet"):
+        imports=["??0_Lockit@std@@QAE@H@Z","??1_Lockit@std@@QAE@XZ",
+                 "?id@?$codecvt@DDU_Mbstatet@@@std@@2V0locale@2@A","??Bid@locale@std@@QAEIXZ",
+                 "?always_noconv@codecvt_base@std@@QBE_NXZ"]
+        code=bytearray.fromhex("6a00b900174000ff1580184000b900174000ff1584184000a188184000");branches=[]
+        def facet_compare(value):
+            code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+        facet_compare(0x0fe52110)
+        code.extend(bytes.fromhex("8bc8ff158c184000"));facet_compare(1)
+        code.extend(b"\xb9"+struct.pack("<I",0x401700 if kind=="wrong-facet" else 0x0fe53040))
+        code.extend(bytes.fromhex("ff1590184000"));facet_compare(1)
+        code.extend(bytes.fromhex("b94030e50fa14030e50fff500c"));facet_compare(1)
+        code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+        for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+        yield "classic-codecvt-"+kind,{0:code},[],True,{"dll":"MSVCP140.dll","names":imports},(
+            "cpp_codecvt" if kind=="wrong-facet" else "entry_returned"),(
+            "0x00401700" if kind=="wrong-facet" else "0x0000600d")
+    fiopen="?_Fiopen@std@@YAPAU_iobuf@@PBDHH@Z"
+    for kind in ("read-only","missing","parent","write-mode"):
+        filename={"missing":b"absent.conf\0","parent":b"../fixture.conf\0"}.get(kind,b"fixture.conf\0")
+        operations=[(fiopen,[0x401700,2 if kind=="write-mode" else 1,0x40],
+                     0x03000000 if kind=="read-only" else 0)]
+        if kind=="read-only":
+            operations.extend([("_get_stream_buffer_pointers",[0x03000000,0x401740,0x401744,0x401748],None),
+                               ("read32",[0x401740],0x03000004),("read32",[0x401744],0x03000000),
+                               ("read32",[0x401748],0x03000008),("read32",[0x03000008],0),
+                               ("fclose",[0x03000000],0),(fiopen,[0x401700,1,0x40],0x03000000),
+                               ("fclose",[0x03000000],0)])
+        elif kind!="write-mode":
+            operations.extend([("_errno",[],0x0fe50028),("read32",[0x0fe50028],22 if kind=="parent" else 2)])
+        imports=[fiopen,"fclose","_errno","_get_stream_buffer_pointers"];patches,_=calls_program(imports,operations,frozenset(imports))
+        patches[0x700]=filename
+        yield "content-file-"+kind,patches,[],True,{"dll":"MSVCP140.dll","names":imports},(
+            "file_open_mode" if kind=="write-mode" else "entry_returned"),(
+            "0x00000002" if kind=="write-mode" else "0x0000600d")
+    ios_ctor="??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ"
+    istream_ctor="??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z"
+    streambuf_ctor="??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAE@XZ"
+    streambuf_init="?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ"
+    streambuf_getloc="?getloc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QBE?AVlocale@2@XZ"
+    for kind in ("state","reset","virtual"):
+        code=bytearray.fromhex("b900174000ff1580184000");branches=[]
+        def buffer_compare(value):
+            code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+        buffer_compare(0x401700)
+        if kind=="virtual":code.extend(bytes.fromhex("6a00a100174000ff10"))
+        if kind=="reset":
+            for offset in range(0,0x38,4):
+                code.extend(b"\xc7\x05"+struct.pack("<II",0x401700+offset,0x11223344))
+            code.extend(bytes.fromhex("b900174000ff1584184000"))
+        expected={0:0x11223344 if kind=="reset" else 0x0fe5201c,
+                  0x34:0x11223344 if kind=="reset" else 0x03000000,0x38:0xa5a5a5a5}
+        for offset in (4,0x14,0x24):
+            expected.update({offset:0,offset+4:0,offset+8:0x401700+offset,offset+12:0x401704+offset})
+        for offset,value in expected.items():
+            code.extend(b"\xa1"+struct.pack("<I",0x401700+offset));buffer_compare(value)
+        # Inline MSVC accessors dereference these aliases; they must reach the real cells.
+        code.extend(bytes.fromhex("a10c174000c7002a000000a104174000"));buffer_compare(42)
+        if kind=="state":
+            code.extend(bytes.fromhex("6880174000b900174000ff1588184000"));buffer_compare(0x401780)
+            for address,value in ((0x401780,0xa5a5a5a5),(0x401784,0x0fe53000),(0x0fe53004,3)):
+                code.extend(b"\xa1"+struct.pack("<I",address));buffer_compare(value)
+            code.extend(bytes.fromhex("b90030e50fa10030e50fff5008a10430e50f"));buffer_compare(2)
+        code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+        for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+        yield "basic-streambuf-"+kind,{0:code,0x700:bytes([0xa5])*64,0x780:bytes([0xa5])*8},[],True,{
+            "dll":"MSVCP140.dll","names":[streambuf_ctor,streambuf_init,streambuf_getloc]},(
+            "cpp_virtual_method" if kind=="virtual" else "entry_returned"),(
+            "0x0fd40030" if kind=="virtual" else "0x0000600d")
+    for kind in ("null","buffer","mode","virtual"):
+        buffer=0x401700 if kind=="buffer" else 0
+        code=bytearray.fromhex("b970164000ff1580184000")
+        code.extend(b"\x6a\x00\x6a"+bytes([kind=="mode"])+b"\x68"+struct.pack("<I",buffer))
+        code.extend(bytes.fromhex("b900164000ff1584184000"));branches=[]
+        def stream_compare(value):
+            code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+        stream_compare(0x401600)
+        if kind=="virtual":code.extend(bytes.fromhex("b9701640006a00a170164000ff10"))
+        values={0:0x401740,4:0xa5a5a5a5,8:0,12:0,0x6c:0x58,0x70:0x0fe5200c,
+                0x74:0xa5a5a5a5,0x78:0,0x7c:0 if buffer else 4,0x80:0,0x84:0x201,0x88:6,
+                0x8c:0,0x90:0,0x94:0,0x98:0,0x9c:0,0xa0:0x03000000,0xa4:0xa5a5a5a5,
+                0xa8:buffer,0xac:0,0xb0:0xa5a5a520,0xb4:0xa5a5a5a5}
+        for offset,value in values.items():code.extend(b"\xa1"+struct.pack("<I",0x401600+offset));stream_compare(value)
+        for address,value in ((0x03000004,0x0fe53000),(0x0fe53004,2),(0x0fe52100,0x43)):
+            code.extend(b"\xa1"+struct.pack("<I",address));stream_compare(value)
+        code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+        for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+        assert len(code)<0x600
+        data=bytearray([0xa5]*0xc0);struct.pack_into("<I",data,0,0x401740)
+        stop,target={"mode":("cpp_stream_ctor_mode","0x00000001"),"virtual":("cpp_virtual_method","0x0fd40010")}.get(kind,("entry_returned","0x0000600d"))
+        yield "basic-istream-"+kind,{0:code,0x600:data,0x740:struct.pack("<II",0,0x70)},[],True,{
+            "dll":"MSVCP140.dll","names":[ios_ctor,istream_ctor]},stop,target
+    for kind in ("normal","null","readonly","virtual","vtable-readonly","wrong-module"):
+        address=0 if kind=="null" else 0x401700
+        code=bytearray(b"\xb9"+struct.pack("<I",address)+bytes.fromhex("ff1580184000"));branches=[]
+        def ios_compare(value):
+            code.extend(b"\x3d"+struct.pack("<I",value)+b"\x0f\x85");branches.append(len(code));code.extend(bytes(4))
+        ios_compare(address);code.extend(bytes.fromhex("89c8"));ios_compare(address)
+        if kind=="virtual":code.extend(bytes.fromhex("6a00a100174000ff10"))
+        if kind=="vtable-readonly":code.extend(bytes.fromhex("c7050420e50f00000000"))
+        for offset in range(0,96,4):
+            value=(0x0fe52004 if not offset else (0 if offset in (*range(8,0x34,4),0x38,0x3c) else
+                   (0xa5a5a500 if offset==0x40 else 0xa5a5a5a5)))
+            code.extend(b"\xa1"+struct.pack("<I",0x401700+offset));ios_compare(value)
+        code.extend(bytes.fromhex("b80d600000c3"));failure=len(code);code.extend(bytes.fromhex("b8ad0b0000c3"))
+        for branch in branches:struct.pack_into("<i",code,branch,failure-branch-4)
+        stop,target={"null":("write_bounds","0x00000000"),"readonly":("write_permission","0x00401700"),
+                     "virtual":("cpp_virtual_method","0x0fd40000"),"vtable-readonly":("write_permission","0x0fe52004"),
+                     "wrong-module":("missing_import","0x00401880")}.get(kind,("entry_returned","0x0000600d"))
+        imported={"dll":"KERNEL32.dll" if kind=="wrong-module" else "MSVCP140.dll","names":[ios_ctor]}
+        yield "basic-ios-"+kind,{0:code,0x700:bytes([0xa5])*96},[],kind!="readonly",imported,stop,target
+    modes=["GetErrorMode","SetErrorMode","SetLastError","GetLastError"]
+    operations=[("SetLastError",[0x1234],None),("GetErrorMode",[],0),("SetErrorMode",[0x8002],0),
+                ("GetErrorMode",[],0x8002),("SetErrorMode",[0x8003],0x8002),("SetErrorMode",[1],0x8003),
+                ("GetErrorMode",[],1),("SetErrorMode",[0],1),("GetErrorMode",[],0),("GetLastError",[],0x1234)]
+    patches,imports=calls_program(modes,operations)
+    yield "process-error-mode",patches,[],False,imports,"entry_returned","0x0000600d"
+    for suffix,value in (("alignment",4),("unknown",0x10)):
+        patches,imports=calls_program(modes,[("SetErrorMode",[value],None)])
+        yield "process-error-mode-"+suffix,patches,[],False,imports,"error_mode_flags",f"0x{value:08x}"
+    for kind in ("owned","unowned","named","namespace"):
+        patches,imports=mutex_program(kind)
+        yield "mutex-"+kind,patches,[],False,imports,"entry_returned","0x0000600d"
+    command_line="_get_narrow_winmain_command_line"
+    patches,imports=calls_program([command_line],[(command_line,[],0x0fe51000),("read32",[0x0fe51000],0),
+                                                  (command_line,[],0x0fe51000)])
+    yield "winmain-empty-command-line",patches,[],False,imports,"entry_returned","0x0000600d"
+    for kind,address in (("normal",0x401700),("null",0),("readonly",0x401700),("boundary",0x401fe0)):
+        imports=["GetStartupInfoW","SetLastError","GetLastError"]
+        operations=[("SetLastError",[0x1234],None),("GetStartupInfoW",[address],None)]
+        operations.extend(("read32",[0x401700+offset],68 if not offset else 0) for offset in range(0,68,4))
+        operations.extend([("read32",[0x4016fc],0xa5a5a5a5),("read32",[0x401744],0xa5a5a5a5),("GetLastError",[],0x1234)])
+        patches,imports=calls_program(imports,operations)
+        patches[0x6fc]=bytes([0xa5])*76
+        stop,target=(("entry_returned","0x0000600d") if kind=="normal" else
+                     (("write_bounds","0x00000000") if kind=="null" else ("write_permission",f"0x{address:08x}")))
+        yield "startup-info-"+kind,patches,[],kind!="readonly",imports,stop,target
     for name,source,stop,target in (("simd-scalar-double",0x401723,"entry_returned","0x0000600d"),
                                     ("simd-scalar-double-memory",0x402000,"read_permission","0x00402000")):
         patches,imports=scalar_movsd_program(source)
@@ -362,13 +567,16 @@ def main():
         output = ROOT / ".work/runtime-tests" / ("loop call" if name=="loop-call" else name)
         output.mkdir(parents=True, exist_ok=True)
         data = bytearray(fixture())
+        dll_name="KERNEL32.dll"
+        if isinstance(imported,dict):dll_name,imported=imported["dll"],imported["names"]
         if isinstance(imported,list):
             data.extend(bytes(0x1200-len(data)))
             struct.pack_into("<I",data,0x178+8,0x1000)
             struct.pack_into("<I",data,0x178+16,0x1000)
             struct.pack_into("<II",data,0x98+96+8,0x1800,40)
             struct.pack_into("<IIIII",data,0xa00,0x1840,0,0,0x1a00,0x1880)
-            data[0xc00:0xc0d]=b"KERNEL32.dll\0"
+            dll_bytes=dll_name.encode("ascii")+b"\0";assert len(dll_bytes)<64
+            data[0xc00:0xc00+len(dll_bytes)]=dll_bytes
             pool=0x18c0
             for index, symbol in enumerate(imported):
                 struct.pack_into("<I",data,0xa40+4*index,pool)
@@ -392,14 +600,28 @@ def main():
         freeze_source(output)
         target = ["--target=x86_64-w64-windows-gnu"] if os.name == "nt" else []
         executable = build(args.clang.resolve(), target, kit, output)
+        content_args=[]
+        if name.startswith("content-file-"):
+            (output/"fixture.conf").write_bytes(b"A\r\nB\x1aC")
+            content_args=[str(output)]
         environment=(os.environ | {"TZ":"UTC0"}) if name.startswith("calendar-") else None
-        observed = run_stop([str(executable), str(output / "image.bin")], output / "host.log",env=environment)
+        observed = run_stop([str(executable), str(output / "image.bin"),*content_args], output / "host.log",env=environment)
         assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
         if name.startswith("filesystem-export-") or name in ("dynamic-export-unknown","dynamic-export-wrong-module"):
             assert observed["stubs"]["optional_filesystem_exports_absent"]==int(name.startswith("filesystem-export-")),observed
         if name in ("initterm", "initterm-e"):
             assert (observed["c_initializers_completed"],observed["cpp_initializers_completed"])==((2,0) if name=="initterm-e" else (0,3))
         results[name] = {"host": observed}
+        if os.name=="nt" and name=="basic-ios-normal":
+            reference_dll=Path(os.environ.get("WINDIR",r"C:\Windows"))/"SysWOW64/msvcp140.dll"
+            expected="f0cda2a0cf1fe6fbbf579b9098462329d3aaa7513a207af2e0f33b01456e388a"
+            if hashlib.sha256(reference_dll.read_bytes()).hexdigest()!=expected:raise ValueError("MSVCP reference DLL changed")
+            oracle=output/"original-msvcp.exe"
+            subprocess.run([str(args.clang.resolve()),"--target=i686-w64-windows-gnu","-O1","-Wall","-Wextra","-Werror",
+                            str(ROOT/"tests/x86_msvcp_ios_oracle_win.c"),"-o",str(oracle)],check=True)
+            reference=json.loads(subprocess.check_output([str(oracle),str(reference_dll)],text=True,timeout=30))
+            assert reference==dict(return_this=True,fields_match=True,vftable_rva=0x2f64),reference
+            results[name]["original_x86_msvcp"]=reference
         if os.name=="nt" and name.startswith(("simd-paddd","simd-scalar-double")):
             oracle=output/"original-x86.exe"
             subprocess.run([str(args.clang.resolve()),"--target=i686-w64-windows-gnu","-O1","-Wall","-Wextra","-Werror",
@@ -431,9 +653,11 @@ def main():
                 adb("shell", "mkdir", remote)
                 adb("push", str(android), remote + "/runtime")
                 adb("push", str(output / "image.bin"), remote + "/image.bin")
+                if content_args:adb("push",str(output/"fixture.conf"),remote+"/fixture.conf")
                 adb("shell", "chmod", "700", remote + "/runtime")
                 timezone_args=["env","TZ=UTC0"] if environment else []
-                observed = run_stop([*command, "shell",*timezone_args,remote + "/runtime", remote + "/image.bin"], output / "android.log")
+                observed = run_stop([*command, "shell",*timezone_args,remote + "/runtime", remote + "/image.bin",
+                                     *([remote] if content_args else [])], output / "android.log")
                 assert observed["stop"]==expected_stop and (expected_target is None or observed["target"]==expected_target), (name, observed)
                 if name.startswith("filesystem-export-") or name in ("dynamic-export-unknown","dynamic-export-wrong-module"):
                     assert observed["stubs"]["optional_filesystem_exports_absent"]==int(name.startswith("filesystem-export-")),observed
@@ -442,6 +666,7 @@ def main():
                 results[name]["android"] = observed
             finally:
                 adb("shell", "rm", "-f", remote + "/runtime", remote + "/image.bin", check=False)
+                if content_args:adb("shell","rm","-f",remote+"/fixture.conf",check=False)
                 adb("shell", "rmdir", remote, check=False)
         result_path.write_text(json.dumps(results, indent=2) + "\n")
     print(json.dumps({"scenarios_passed": len(results), "platforms": ["host", "android"] if serial else ["host"]}))

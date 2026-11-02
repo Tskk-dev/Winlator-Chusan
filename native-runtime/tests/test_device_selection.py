@@ -23,6 +23,12 @@ class DeviceSelectionTest(unittest.TestCase):
         self.assertEqual(device.select_device(output),serial)
         self.assertEqual(device.select_device(output,serial),serial)
 
+    def test_wireless_collision_alias_can_change_without_selecting_another_tablet(self):
+        old="adb-tablet (2)._adb-tls-connect._tcp";new="adb-tablet._adb-tls-connect._tcp"
+        output="List of devices attached\n"+new+"\tdevice\n"
+        self.assertEqual(device.select_device(output,old),new)
+        with self.assertRaises(ValueError):device.select_device(output,"adb-other._adb-tls-connect._tcp")
+
     def test_multiple_devices_require_explicit_selection(self):
         output = "List of devices attached\nabc device\ndef device\n"
         with self.assertRaises(ValueError):
